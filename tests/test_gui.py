@@ -1,0 +1,344 @@
+"""GUI tests, run against Qt's offscreen platform.
+
+These exercise the widgets and the Qt models directly; the engine is replaced
+with hand-built results so nothing here touches the network.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip("PySide6", reason="PySide6 is not installed")
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+
+from wosint.core.models import Finding, ModuleResult, ModuleStatus, Severity
+from wosint.core.settings import Settings
+from wosint.core.targets import parse_target
+from wosint.gui.models import FindingFilterProxy, FindingTableModel, ModuleTableModel
+from wosint.gui.widgets.module_panel import ModulePanel
+from wosint.gui.widgets.results_panel import ResultsPanel
+from wosint.gui.widgets.target_bar import TargetBar
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def findings() -> list[Finding]:
+    return [
+        Finding("dns", "A record", "1.2.3.4", "TTL 300s"),
+        Finding("dns", "Mail policy", "no SPF record", "spoofable", Severity.WARNING),
+        Finding("certificate", "Subdomain", "dev.example.com", "", Severity.NOTABLE),
+    ]
+
+
+# -- target bar --------------------------------------------------------------
+
+
+def test_target_bar_classifies_as_you_type(qapp) -> None:
+    bar = TargetBar()
+
+    bar.input.setText("example.com")
+    assert bar.badge.text() == "Domain"
+    assert bar.scan_button.isEnabled()
+
+    bar.input.setText("bob@example.com")
+    assert bar.badge.text() == "Email address"
+
+    bar.input.setText("1.2.3.4")
+    assert bar.badge.text() == "IPv4 address"
+
+
+def test_target_bar_disables_scanning_for_invalid_input(qapp) -> None:
+    bar = TargetBar()
+    bar.input.setText("not a target!")
+
+    assert bar.target is None
+    assert bar.badge.text() == "unrecognised"
+    assert not bar.scan_button.isEnabled()
+
+
+def test_target_bar_emits_only_valid_targets(qapp) -> None:
+    bar = TargetBar()
+    emitted = []
+    bar.scan_requested.connect(emitted.append)
+
+    bar.input.setText("not a target!")
+    bar.scan_button.click()
+    assert emitted == []
+
+    bar.input.setText("example.com")
+    bar.scan_button.click()
+    assert [t.value for t in emitted] == ["example.com"]
+
+
+def test_target_bar_locks_input_while_scanning(qapp) -> None:
+    bar = TargetBar()
+    bar.input.setText("example.com")
+
+    bar.set_scanning(True)
+    assert not bar.scan_button.isEnabled()
+    assert bar.cancel_button.isEnabled()
+    assert not bar.input.isEnabled()
+
+    bar.set_scanning(False)
+    assert bar.scan_button.isEnabled()
+    assert not bar.cancel_button.isEnabled()
+
+
+# -- module panel ------------------------------------------------------------
+
+
+def test_module_panel_lists_only_applicable_modules(qapp) -> None:
+    panel = ModulePanel(Settings())
+
+    panel.set_target(parse_target("1.2.3.4"))
+    ip_modules = {
+        panel.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(panel.list.count())
+    }
+
+    assert "geoip" in ip_modules
+    assert "crtsh" not in ip_modules  # certificates are a domain concept
+    assert "sherlock" not in ip_modules
+
+
+def test_module_panel_disables_modules_whose_tool_is_missing(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("example.com"))
+
+    for row in range(panel.list.count()):
+        item = panel.list.item(row)
+        if item.data(Qt.ItemDataRole.UserRole) == "whois":
+            assert not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+            assert "unavailable" in item.text()
+            return
+    pytest.fail("whois was not listed for a domain target")
+
+
+def test_module_panel_remembers_deselection_across_targets(qapp) -> None:
+    """Retyping a target must not silently re-tick a module the user turned off."""
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("example.com"))
+    assert "dns" in panel.selected_modules()
+
+    for row in range(panel.list.count()):
+        item = panel.list.item(row)
+        if item.data(Qt.ItemDataRole.UserRole) == "dns":
+            item.setCheckState(Qt.CheckState.Unchecked)
+
+    panel.set_target(parse_target("other.example"))
+    assert "dns" not in panel.selected_modules()
+
+
+def test_module_panel_select_all_and_none(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("example.com"))
+
+    panel.none_button.click()
+    assert panel.selected_modules() == []
+
+    panel.all_button.click()
+    assert "dns" in panel.selected_modules()
+    assert "whois" not in panel.selected_modules()  # unavailable, so never ticked
+
+
+def test_module_panel_clears_for_no_target(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("example.com"))
+    panel.set_target(None)
+
+    assert panel.list.count() == 0
+    assert panel.selected_modules() == []
+
+
+# -- table models ------------------------------------------------------------
+
+
+def test_finding_model_exposes_every_column(qapp, findings) -> None:
+    model = FindingTableModel()
+    model.add_findings(findings, "dns")
+
+    assert model.rowCount() == 3
+    row = [model.data(model.index(0, c)) for c in range(model.columnCount())]
+    assert row == ["info", "dns", "A record", "1.2.3.4", "TTL 300s", "dns"]
+
+
+def test_finding_model_sorts_severity_by_rank_not_alphabetically(qapp, findings) -> None:
+    model = FindingTableModel()
+    model.add_findings(findings, "dns")
+    proxy = FindingFilterProxy()
+    proxy.setSourceModel(model)
+    proxy.sort(0, Qt.SortOrder.DescendingOrder)
+
+    assert proxy.data(proxy.index(0, 0)) == "warning"
+    assert proxy.data(proxy.index(2, 0)) == "info"
+
+
+def test_finding_filter_matches_any_column(qapp, findings) -> None:
+    model = FindingTableModel()
+    model.add_findings(findings, "crtsh")
+    proxy = FindingFilterProxy()
+    proxy.setSourceModel(model)
+
+    proxy.set_query("dev.example")
+    assert proxy.rowCount() == 1
+
+    proxy.set_query("crtsh")
+    assert proxy.rowCount() == 3
+
+    proxy.set_query("")
+    assert proxy.rowCount() == 3
+
+
+def test_finding_filter_applies_severity_floor(qapp, findings) -> None:
+    model = FindingTableModel()
+    model.add_findings(findings, "dns")
+    proxy = FindingFilterProxy()
+    proxy.setSourceModel(model)
+
+    proxy.set_min_severity(Severity.NOTABLE)
+    assert proxy.rowCount() == 2
+
+    proxy.set_min_severity(Severity.WARNING)
+    assert proxy.rowCount() == 1
+
+
+def test_finding_model_replaces_a_module_rather_than_duplicating(qapp, findings) -> None:
+    model = FindingTableModel()
+    model.add_findings(findings, "dns")
+    model.remove_module("dns")
+    model.add_findings(findings, "dns")
+
+    assert model.rowCount() == 3
+
+
+def test_module_model_updates_a_row_in_place(qapp) -> None:
+    model = ModuleTableModel()
+    model.set_modules([ModuleResult(module="dns", title="DNS records", kind="api")])
+
+    updated = ModuleResult(
+        module="dns",
+        title="DNS records",
+        kind="api",
+        status=ModuleStatus.OK,
+        findings=[Finding("dns", "A record", "1.2.3.4")],
+        duration_ms=1200,
+    )
+    model.update(updated)
+
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 2)) == "Done"
+    assert model.data(model.index(0, 3)) == "1"
+    assert model.data(model.index(0, 4)) == "1.2s"
+
+
+def test_module_model_adds_unannounced_modules(qapp) -> None:
+    model = ModuleTableModel()
+    model.set_modules([])
+    model.update(ModuleResult(module="late", title="Late", kind="api"))
+    assert model.rowCount() == 1
+
+
+# -- results panel -----------------------------------------------------------
+
+
+def test_results_panel_folds_in_a_completed_module(qapp, findings) -> None:
+    panel = ResultsPanel()
+    panel.reset([ModuleResult(module="dns", title="DNS records", kind="api")])
+
+    panel.apply_result(
+        ModuleResult(
+            module="dns",
+            title="DNS records",
+            kind="api",
+            status=ModuleStatus.OK,
+            findings=findings,
+            raw="raw dns output",
+        )
+    )
+
+    assert panel.findings_model.rowCount() == 3
+    assert panel.count_label.text() == "3 findings"
+    assert panel.raw_selector.count() == 1
+
+
+def test_results_panel_ignores_in_flight_updates(qapp, findings) -> None:
+    """A RUNNING update refreshes status but must not add findings yet."""
+    panel = ResultsPanel()
+    panel.reset([ModuleResult(module="dns", title="DNS records", kind="api")])
+
+    panel.apply_result(
+        ModuleResult(module="dns", title="DNS records", kind="api", status=ModuleStatus.RUNNING)
+    )
+
+    assert panel.findings_model.rowCount() == 0
+    assert panel.modules_model.data(panel.modules_model.index(0, 2)) == "Running"
+
+
+def test_results_panel_reset_clears_previous_scan(qapp, findings) -> None:
+    panel = ResultsPanel()
+    panel.reset([ModuleResult(module="dns", title="DNS records", kind="api")])
+    panel.apply_result(
+        ModuleResult(
+            module="dns",
+            title="DNS records",
+            kind="api",
+            status=ModuleStatus.OK,
+            findings=findings,
+            raw="raw",
+        )
+    )
+
+    panel.reset([ModuleResult(module="rdap", title="RDAP", kind="api")])
+
+    assert panel.findings_model.rowCount() == 0
+    assert panel.raw_selector.count() == 0
+    assert panel.raw_view.toPlainText() == ""
+    assert panel.count_label.text() == "No findings yet"
+
+
+def test_results_panel_reports_filtered_counts(qapp, findings) -> None:
+    panel = ResultsPanel()
+    panel.reset([ModuleResult(module="dns", title="DNS records", kind="api")])
+    panel.apply_result(
+        ModuleResult(
+            module="dns",
+            title="DNS records",
+            kind="api",
+            status=ModuleStatus.OK,
+            findings=findings,
+        )
+    )
+
+    panel.search.setText("dev.example")
+    assert panel.count_label.text() == "1 of 3 findings"
+    assert [f.value for f, _ in panel.visible_findings()] == ["dev.example.com"]
+
+
+def test_results_panel_switches_to_raw_output_for_a_module(qapp, findings) -> None:
+    panel = ResultsPanel()
+    panel.reset([ModuleResult(module="dns", title="DNS records", kind="api")])
+    panel.apply_result(
+        ModuleResult(
+            module="dns",
+            title="DNS records",
+            kind="api",
+            status=ModuleStatus.OK,
+            findings=findings,
+            raw="raw dns output",
+        )
+    )
+
+    panel.show_module_raw("dns")
+
+    assert panel.tabs.currentIndex() == 2
+    assert panel.raw_view.toPlainText() == "raw dns output"

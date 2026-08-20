@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wosint"
+version = "0.1.0"
+description = "A desktop OSINT workbench that wraps local CLI tools and public web APIs behind one Qt interface."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PySide6>=6.6",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+wosint = "wosint.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wosint"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:wosint.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Qt's model API defines these defaults; the signature is not ours to change.
+"wosint/gui/models.py" = ["B008"]
+# Modules are imported purely to register themselves with the catalogue.
+"wosint/modules/__init__.py" = ["F401"]
+"wosint/__main__.py" = ["F401"]
+"tests/conftest.py" = ["F401"]
