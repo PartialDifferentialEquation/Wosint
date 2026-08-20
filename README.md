@@ -54,6 +54,10 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+`pip install -r requirements.txt` installs the runtime dependencies alone, for
+running Wosint without installing the package itself. The `[dev]` extra above is
+what you want if you also intend to run the tests.
+
 On a headless Linux box, Qt also needs its system libraries:
 
 ```bash

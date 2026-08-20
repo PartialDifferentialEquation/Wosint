@@ -1,0 +1,27 @@
+# Runtime dependencies for Wosint.
+#
+# pyproject.toml is the source of truth; this file mirrors its [project]
+# dependencies for people who would rather not install the package itself.
+# Keep the two in step when either changes.
+#
+#   pip install -r requirements.txt
+#
+# For the test suite and linter, install the dev extra instead:
+#
+#   pip install -e ".[dev]"
+
+# The desktop interface. Needs system Qt libraries on headless Linux -- see the
+# install section of README.md.
+PySide6>=6.6
+
+# Async HTTP client shared by every API module.
+httpx>=0.27
+
+# Offline phone number parsing (Google's libphonenumber metadata).
+phonenumbers>=8.13
+
+# Reading EXIF metadata out of images.
+Pillow>=10
+
+# Gemini client, used by the image-analysis module.
+google-genai>=1.0
