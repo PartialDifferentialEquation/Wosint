@@ -14,7 +14,7 @@ from PIL.TiffImagePlugin import IFDRational
 from wosint.core.registry import get_module
 from wosint.core.settings import Settings
 from wosint.core.targets import TargetError, TargetType, detect_target_type, parse_target
-from wosint.modules.api_vision import SYSTEM_PROMPT
+from wosint.modules.api_vision import DEFAULT_MODEL, SYSTEM_PROMPT
 
 
 def values(output, label: str) -> list[str]:
@@ -164,7 +164,7 @@ async def test_exif_module_sends_nothing() -> None:
     assert get_module("exif").reaches_network is False
 
 
-# -- Claude vision -----------------------------------------------------------
+# -- Gemini vision -----------------------------------------------------------
 
 EXTRACTION = {
     "text": ["ACME LOGISTICS", "Unit 4, Bell Lane"],
@@ -176,34 +176,40 @@ EXTRACTION = {
 }
 
 
-class FakeMessages:
-    def __init__(self, response, recorder: dict) -> None:
-        self._response = response
+class FakeModels:
+    def __init__(self, holder: dict, recorder: dict) -> None:
+        self._holder = holder
         self._recorder = recorder
 
-    async def create(self, **kwargs):
+    async def generate_content(self, **kwargs):
         self._recorder.update(kwargs)
-        return self._response
+        return self._holder["response"]
 
 
 class FakeClient:
-    """Stands in for AsyncAnthropic, recording the request it was given."""
+    """Stands in for genai.Client, recording the request it was given."""
 
-    def __init__(self, response, recorder: dict) -> None:
-        self.messages = FakeMessages(response, recorder)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
+    def __init__(self, holder: dict, recorder: dict, **kwargs) -> None:
+        recorder["client_kwargs"] = kwargs
+        self.aio = SimpleNamespace(models=FakeModels(holder, recorder))
 
 
-def fake_response(text: str, stop_reason: str = "end_turn", category: str | None = None):
+def fake_response(
+    text: str | None,
+    *,
+    finish_reason: str = "STOP",
+    block_reason: str | None = None,
+    candidates: bool = True,
+):
+    """Build a response shaped like the SDK's, including its enum-ish fields."""
     return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
-        stop_reason=stop_reason,
-        stop_details=SimpleNamespace(category=category) if category else None,
+        text=text,
+        candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name=finish_reason))]
+        if candidates
+        else [],
+        prompt_feedback=SimpleNamespace(
+            block_reason=SimpleNamespace(name=block_reason) if block_reason else None
+        ),
     )
 
 
@@ -213,30 +219,34 @@ def vision(monkeypatch):
     recorder: dict = {}
     holder: dict = {"response": fake_response(json.dumps(EXTRACTION))}
 
-    import anthropic
+    from google import genai
 
-    monkeypatch.setattr(
-        anthropic, "AsyncAnthropic", lambda **kwargs: FakeClient(holder["response"], recorder)
-    )
+    monkeypatch.setattr(genai, "Client", lambda **kwargs: FakeClient(holder, recorder, **kwargs))
     return SimpleNamespace(recorder=recorder, holder=holder)
 
 
 def test_vision_needs_a_key(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for variable in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(variable, raising=False)
     availability = get_module("vision").availability(Settings())
 
     assert not availability.ok
     assert "WOSINT_KEY_VISION" in availability.reason
+    assert "GEMINI_API_KEY" in availability.reason
 
 
-def test_vision_accepts_the_sdk_environment_variable(monkeypatch) -> None:
+@pytest.mark.parametrize("variable", ["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+def test_vision_accepts_the_sdk_environment_variables(monkeypatch, variable: str) -> None:
     """A key set the usual SDK way is perfectly usable."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "test-key")
+
     assert get_module("vision").availability(Settings()).ok
 
 
 async def test_vision_extracts_linkable_identifiers(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     path = write_image(tmp_path / "photo.jpg")
 
     output = await get_module("vision").execute(parse_target(str(path)), ctx)
@@ -251,7 +261,7 @@ async def test_everything_read_from_an_image_is_marked_inferred(
     tmp_path: Path, ctx, vision
 ) -> None:
     """A model's reading of a picture is a lead, never a fact to chain on."""
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     path = write_image(tmp_path / "photo.jpg")
 
     output = await get_module("vision").execute(parse_target(str(path)), ctx)
@@ -260,19 +270,40 @@ async def test_everything_read_from_an_image_is_marked_inferred(
     assert all(f.inferred for f in output.findings)
 
 
-async def test_vision_sends_the_image_and_the_schema(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+async def test_vision_requests_the_configured_model_and_schema(tmp_path: Path, ctx, vision) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
     path = write_image(tmp_path / "photo.jpg")
 
     await get_module("vision").execute(parse_target(str(path)), ctx)
     request = vision.recorder
 
-    assert request["model"] == "claude-opus-5"
-    assert request["output_config"]["format"]["type"] == "json_schema"
-    blocks = request["messages"][0]["content"]
-    assert blocks[0]["type"] == "image"
-    assert blocks[0]["source"]["media_type"] == "image/jpeg"
-    assert blocks[0]["source"]["data"]
+    assert request["model"] == DEFAULT_MODEL
+    assert request["config"].response_mime_type == "application/json"
+    assert request["config"].response_schema is not None
+    assert request["client_kwargs"]["api_key"] == "test-key"
+
+
+async def test_the_model_can_be_overridden_in_settings(tmp_path: Path, ctx, vision) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    ctx.settings.vision_model = "gemini-3.1-flash-preview"
+    path = write_image(tmp_path / "photo.jpg")
+
+    await get_module("vision").execute(parse_target(str(path)), ctx)
+
+    assert vision.recorder["model"] == "gemini-3.1-flash-preview"
+
+
+async def test_vision_sends_the_image_bytes_with_its_media_type(
+    tmp_path: Path, ctx, vision
+) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    path = write_image(tmp_path / "photo.jpg")
+
+    await get_module("vision").execute(parse_target(str(path)), ctx)
+    image_part = vision.recorder["contents"][0]
+
+    assert image_part.inline_data.mime_type == "image/jpeg"
+    assert image_part.inline_data.data
 
 
 def test_the_prompt_forbids_identifying_people_by_face() -> None:
@@ -282,17 +313,62 @@ def test_the_prompt_forbids_identifying_people_by_face() -> None:
     assert "Never guess" in SYSTEM_PROMPT
 
 
-async def test_a_refusal_is_reported_rather_than_crashing(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
-    vision.holder["response"] = fake_response("", stop_reason="refusal", category="privacy")
+async def test_a_blocked_response_is_reported_rather_than_crashing(
+    tmp_path: Path, ctx, vision
+) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    vision.holder["response"] = fake_response(None, finish_reason="SAFETY")
     path = write_image(tmp_path / "photo.jpg")
 
-    with pytest.raises(RuntimeError, match="declined to analyse this image \\(privacy\\)"):
+    with pytest.raises(RuntimeError, match=r"declined to analyse this image \(safety filters\)"):
+        await get_module("vision").execute(parse_target(str(path)), ctx)
+
+
+async def test_an_image_blocked_for_personal_information_says_which(
+    tmp_path: Path, ctx, vision
+) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    vision.holder["response"] = fake_response(None, finish_reason="SPII")
+    path = write_image(tmp_path / "photo.jpg")
+
+    with pytest.raises(RuntimeError, match="sensitive personal information"):
+        await get_module("vision").execute(parse_target(str(path)), ctx)
+
+
+async def test_a_prompt_blocked_before_analysis_is_distinguished(
+    tmp_path: Path, ctx, vision
+) -> None:
+    """Blocked-on-input and blocked-on-output are different answers."""
+    ctx.settings.api_keys["vision"] = "test-key"
+    vision.holder["response"] = fake_response(None, block_reason="PROHIBITED_CONTENT")
+    path = write_image(tmp_path / "photo.jpg")
+
+    with pytest.raises(RuntimeError, match=r"blocked before analysis \(PROHIBITED_CONTENT\)"):
+        await get_module("vision").execute(parse_target(str(path)), ctx)
+
+
+async def test_a_truncated_response_is_not_reported_as_bad_json(
+    tmp_path: Path, ctx, vision
+) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    vision.holder["response"] = fake_response('{"text": ["half', finish_reason="MAX_TOKENS")
+    path = write_image(tmp_path / "photo.jpg")
+
+    with pytest.raises(RuntimeError, match="cut off before it was complete"):
+        await get_module("vision").execute(parse_target(str(path)), ctx)
+
+
+async def test_no_candidates_is_reported_clearly(tmp_path: Path, ctx, vision) -> None:
+    ctx.settings.api_keys["vision"] = "test-key"
+    vision.holder["response"] = fake_response(None, candidates=False)
+    path = write_image(tmp_path / "photo.jpg")
+
+    with pytest.raises(RuntimeError, match="no response"):
         await get_module("vision").execute(parse_target(str(path)), ctx)
 
 
 async def test_unusable_output_is_an_error_not_a_silent_empty(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     vision.holder["response"] = fake_response("not json at all")
     path = write_image(tmp_path / "photo.jpg")
 
@@ -301,7 +377,7 @@ async def test_unusable_output_is_an_error_not_a_silent_empty(tmp_path: Path, ct
 
 
 async def test_an_image_with_nothing_legible_says_so(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     vision.holder["response"] = fake_response(
         json.dumps(
             {
@@ -322,16 +398,16 @@ async def test_an_image_with_nothing_legible_says_so(tmp_path: Path, ctx, vision
 
 
 async def test_an_oversized_image_is_refused_before_upload(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     path = tmp_path / "huge.png"
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * (6 * 1024 * 1024))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * (21 * 1024 * 1024))
 
-    with pytest.raises(RuntimeError, match="accepts up to 5 MB"):
+    with pytest.raises(RuntimeError, match="under 20 MB"):
         await get_module("vision").execute(parse_target(str(path)), ctx)
 
 
 async def test_an_unsupported_image_type_is_refused(tmp_path: Path, ctx, vision) -> None:
-    ctx.settings.api_keys["vision"] = "sk-test"
+    ctx.settings.api_keys["vision"] = "test-key"
     path = tmp_path / "photo.tiff"
     Image.new("RGB", (8, 8)).save(path)
 

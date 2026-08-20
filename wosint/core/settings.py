@@ -38,6 +38,8 @@ class Settings:
             rather than being guessed at.
         contact_email: Address sent to public-records services whose access
             policy requires callers to identify themselves.
+        vision_model: Overrides the model the image-analysis module uses. Empty
+            means the module's own default.
         api_keys: Keyed by module name, for modules that need credentials.
         disabled_modules: Module names never offered or run.
     """
@@ -48,6 +50,7 @@ class Settings:
     user_agent: str = DEFAULT_USER_AGENT
     phone_region: str = ""
     contact_email: str = ""
+    vision_model: str = ""
     api_keys: dict[str, str] = field(default_factory=dict)
     disabled_modules: list[str] = field(default_factory=list)
 
@@ -79,6 +82,7 @@ class Settings:
             ("user_agent", str),
             ("phone_region", str),
             ("contact_email", str),
+            ("vision_model", str),
         ):
             raw = os.environ.get(f"WOSINT_{name.upper()}")
             if raw:

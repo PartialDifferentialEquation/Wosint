@@ -1,22 +1,22 @@
-"""Reading an image with Claude to find things that can be looked up.
+"""Reading an image with Gemini to find things that can be looked up.
 
 An image is the one source that carries information no parser can reach: text on
-a sign, a handle on a screenshot, a uniform, a skyline.  This module asks Claude
+a sign, a handle on a screenshot, a uniform, a skyline.  This module asks Gemini
 to read those out as *linkable identifiers* -- strings that can be fed back into
 the rest of Wosint -- rather than to describe the picture.
 
-It does not identify people. Claude is instructed not to name anyone from their
-face and not to guess at protected characteristics, and the module extracts no
-biometric data of any kind: what it links on is what the image says, not who it
-shows. Face matching is the capability that turns an OSINT tool into a
+It does not identify people. The model is instructed not to name anyone from
+their face and not to guess at protected characteristics, and the module extracts
+no biometric data of any kind: what it links on is what the image says, not who
+it shows. Face matching is the capability that turns an OSINT tool into a
 surveillance one, and it is deliberately absent.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -26,11 +26,32 @@ from ..core.settings import Settings
 from ..core.targets import Target, TargetType
 from .base import ApiModule, Availability, ModuleOutput, RunContext
 
-#: The model used for image analysis.
-MODEL = "claude-opus-5"
+#: The model used for image analysis. Override with WOSINT_VISION_MODEL.
+DEFAULT_MODEL = "gemini-3.1-pro-preview"
 
-#: Largest image the API accepts, before base64 expansion.
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+#: Environment variables the Google SDK itself reads, accepted here too so a key
+#: configured the usual way just works.
+SDK_KEY_VARIABLES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+#: Image types the API accepts inline, mapped from what we detect locally.
+SUPPORTED_MEDIA_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+)
+
+#: Inline image data is capped by the request size limit; larger files need the
+#: Files API, which is a different upload flow.
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+#: Finish reasons that mean the model stopped rather than answered, mapped to
+#: what to tell the analyst.
+BLOCKING_FINISH_REASONS = {
+    "SAFETY": "safety filters",
+    "PROHIBITED_CONTENT": "prohibited content",
+    "IMAGE_SAFETY": "image safety filters",
+    "SPII": "the image appears to contain sensitive personal information",
+    "RECITATION": "recitation filters",
+    "BLOCKLIST": "a blocked-term list",
+}
 
 SYSTEM_PROMPT = """\
 You are assisting an OSINT analyst who is working within an authorised \
@@ -75,7 +96,6 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         "context": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["text", "handles", "organisations", "locations", "devices", "context"],
-    "additionalProperties": False,
 }
 
 #: Each extracted field, with the category and severity it becomes.
@@ -91,12 +111,12 @@ FIELDS = (
 
 @register
 class VisionModule(ApiModule):
-    """Identifiers read out of an image by Claude."""
+    """Identifiers read out of an image by Gemini."""
 
     name = "vision"
-    title = "Image analysis (Claude)"
+    title = "Image analysis (Gemini)"
     description = "Reads text, handles, signage and context out of an image. Needs an API key."
-    source_url = "https://www.anthropic.com"
+    source_url = "https://ai.google.dev"
     supported_types: ClassVar[frozenset] = frozenset({TargetType.IMAGE})
     requires_key = True
 
@@ -104,32 +124,21 @@ class VisionModule(ApiModule):
         base = super().availability(settings)
         if base:
             return base
-        # The SDK also reads ANTHROPIC_API_KEY, so a key configured that way is
-        # perfectly usable even though WOSINT_KEY_VISION is unset.
-        import os
-
-        if os.environ.get("ANTHROPIC_API_KEY"):
+        if _sdk_key():
             return Availability.available()
         return Availability.missing(
-            "no API key configured (set WOSINT_KEY_VISION or ANTHROPIC_API_KEY)"
+            "no API key configured (set WOSINT_KEY_VISION or GEMINI_API_KEY)"
         )
 
     async def execute(self, target: Target, ctx: RunContext) -> ModuleOutput:
         out = ModuleOutput()
         path = Path(target.value)
-        media_type, data = _encode(path)
+        media_type, raw = _read_image(path)
 
-        response = await self._ask(data, media_type, ctx)
-
-        # A safety decline is an answer, not a crash: say which category and
-        # let the analyst decide what to do with the image.
-        if response.stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            category = getattr(details, "category", None) or "unspecified"
-            raise RuntimeError(f"the model declined to analyse this image ({category})")
-
-        text = next((b.text for b in response.content if b.type == "text"), "")
+        response = await self._ask(raw, media_type, ctx)
+        text = _usable_text(response)
         out.raw = text
+
         try:
             extracted = json.loads(text)
         except ValueError as exc:
@@ -140,38 +149,28 @@ class VisionModule(ApiModule):
             out.add("image", "Analysis", "nothing legible to look up in this image")
         return out
 
-    async def _ask(self, data: str, media_type: str, ctx: RunContext) -> Any:
+    async def _ask(self, raw: bytes, media_type: str, ctx: RunContext) -> Any:
         """Send the image and return the raw API response."""
         try:
-            from anthropic import AsyncAnthropic
+            from google import genai
+            from google.genai import types
         except ImportError as exc:  # pragma: no cover - dependency is declared
-            raise RuntimeError("the anthropic package is not installed") from exc
+            raise RuntimeError("the google-genai package is not installed") from exc
 
-        key = ctx.api_key(self.name)
-        client = AsyncAnthropic(api_key=key) if key else AsyncAnthropic()
-        async with client:
-            return await client.messages.create(
-                model=MODEL,
-                max_tokens=8000,
-                system=SYSTEM_PROMPT,
-                output_config={"format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}},
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": data,
-                                },
-                            },
-                            {"type": "text", "text": USER_PROMPT},
-                        ],
-                    }
-                ],
-            )
+        client = genai.Client(api_key=ctx.api_key(self.name) or _sdk_key())
+        return await client.aio.models.generate_content(
+            model=ctx.settings.vision_model or DEFAULT_MODEL,
+            contents=[
+                types.Part.from_bytes(data=raw, mime_type=media_type),
+                USER_PROMPT,
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=RESPONSE_SCHEMA,
+                max_output_tokens=8000,
+            ),
+        )
 
     def _to_findings(self, extracted: dict[str, Any], out: ModuleOutput) -> None:
         for key, category, label, severity in FIELDS:
@@ -190,22 +189,73 @@ class VisionModule(ApiModule):
                 )
 
 
-def _encode(path: Path) -> tuple[str, str]:
-    """Read an image as base64 with its media type.
+def _sdk_key() -> str | None:
+    """A key set the way the Google SDK expects, if there is one."""
+    for variable in SDK_KEY_VARIABLES:
+        value = os.environ.get(variable)
+        if value:
+            return value
+    return None
+
+
+def _usable_text(response: Any) -> str:
+    """The response body, or a clear error explaining why there is none.
+
+    A blocked request and an empty answer look similar from the outside, so
+    each case is turned into its own message rather than a generic parse
+    failure further down.
 
     Raises:
-        RuntimeError: If the file is unreadable or too large to send.
+        RuntimeError: If the prompt or the response was blocked, the output was
+            truncated, or nothing came back at all.
+    """
+    feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(feedback, "block_reason", None)
+    if block_reason:
+        raise RuntimeError(f"the request was blocked before analysis ({_name(block_reason)})")
+
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        raise RuntimeError("the model returned no response")
+
+    finish_reason = _name(getattr(candidates[0], "finish_reason", None))
+    if finish_reason in BLOCKING_FINISH_REASONS:
+        raise RuntimeError(
+            f"the model declined to analyse this image ({BLOCKING_FINISH_REASONS[finish_reason]})"
+        )
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError("the response was cut off before it was complete")
+
+    text = getattr(response, "text", None)
+    if not text:
+        raise RuntimeError("the model returned an empty response")
+    return text
+
+
+def _name(value: Any) -> str:
+    """The plain name of an SDK enum member, which may also arrive as a string."""
+    return str(getattr(value, "name", value) or "")
+
+
+def _read_image(path: Path) -> tuple[str, bytes]:
+    """Read an image and its media type.
+
+    Raises:
+        RuntimeError: If the type is unsupported, or the file is unreadable or
+            too large to send inline.
     """
     media_type, _ = mimetypes.guess_type(path.name)
-    if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+    if media_type not in SUPPORTED_MEDIA_TYPES:
         raise RuntimeError(
             f"unsupported image type {media_type or path.suffix!r}; "
-            "the API accepts JPEG, PNG, GIF and WebP"
+            "the API accepts JPEG, PNG, WebP, HEIC and HEIF"
         )
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise RuntimeError(f"could not read {path.name}: {exc}") from exc
     if len(raw) > MAX_IMAGE_BYTES:
-        raise RuntimeError(f"{path.name} is {len(raw) / 1e6:.1f} MB; the API accepts up to 5 MB")
-    return media_type, base64.standard_b64encode(raw).decode("ascii")
+        raise RuntimeError(
+            f"{path.name} is {len(raw) / 1e6:.1f} MB; images sent inline must be under 20 MB"
+        )
+    return media_type, raw

@@ -156,7 +156,7 @@ Public records and images:
 | `courtlistener` | api | person, domain | US federal and state court dockets |
 | `opensanctions` | api | person, domain | Sanctions, watchlist and PEP entries (needs a key) |
 | `opencorporates` | api | person | Directorships and officerships (needs a key) |
-| `vision` | api | image | Text, handles, signage and context read out of a photo (needs a key) |
+| `vision` | api | image | Text, handles, signage and context read out of a photo, via Gemini (needs a key) |
 
 The `local` modules never touch the network. `email`, `phone`, `links`, `exif`
 and `records` therefore work offline, and give you something to go on before
@@ -227,12 +227,12 @@ position, timestamps, camera model and serial number, and any authorship fields
 the camera or editor wrote. That runs entirely offline, and a recorded position
 is flagged as a warning because it places someone somewhere at a time.
 
-The `vision` module additionally asks Claude to read the picture for
+The `vision` module additionally asks Gemini to read the picture for
 **identifiers that can be looked up** — text on signage, a handle visible on a
 screen, a company on a vehicle, a recognisable street. Those feed the same
 profile as everything else, always marked as inferred.
 
-It does not do face recognition. Claude is instructed not to identify anyone
+It does not do face recognition. The model is instructed not to identify anyone
 from their face and not to guess at protected characteristics, and no biometric
 data is extracted or stored. Wosint links on what an image *says*, not on who it
 *shows* — face matching against a person is the capability that turns an OSINT
@@ -261,11 +261,15 @@ overridden by an environment variable:
 | `WOSINT_DISABLED_MODULES` | Comma-separated modules to hide entirely |
 | `WOSINT_PHONE_REGION` | Two-letter region for numbers typed without a country code |
 | `WOSINT_CONTACT_EMAIL` | Contact address for registries that require one (the SEC) |
+| `WOSINT_VISION_MODEL` | Model used for image analysis (default `gemini-3.1-pro-preview`) |
 | `WOSINT_KEY_<MODULE>` | API key for a module that needs one, e.g. `WOSINT_KEY_HIBP` |
 
 Modules needing a key: `hibp`, `opensanctions`, `opencorporates`, and `vision`
-(`WOSINT_KEY_VISION`, or the usual `ANTHROPIC_API_KEY`). `courtlistener` works
-without one; a token only raises its rate limit.
+(`WOSINT_KEY_VISION`, or the usual `GEMINI_API_KEY` / `GOOGLE_API_KEY`).
+`courtlistener` works without one; a token only raises its rate limit.
+
+`vision` calls Gemini, defaulting to `gemini-3.1-pro-preview`. Point it at a
+different model with `WOSINT_VISION_MODEL` — no code change needed.
 
 A malformed config file is ignored rather than fatal — Wosint starts with
 defaults instead of refusing to open over a stray comma.
