@@ -11,6 +11,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -25,6 +26,7 @@ class TargetType(str, Enum):
     USERNAME = "username"
     PHONE = "phone"
     PERSON = "person"
+    IMAGE = "image"
 
     @property
     def label(self) -> str:
@@ -37,6 +39,7 @@ class TargetType(str, Enum):
             TargetType.USERNAME: "Username",
             TargetType.PHONE: "Phone number",
             TargetType.PERSON: "Person",
+            TargetType.IMAGE: "Image",
         }[self]
 
 
@@ -46,8 +49,19 @@ IP_TYPES = frozenset({TargetType.IPV4, TargetType.IPV6})
 #: Modules that handle these are working with personal data, which the UI
 #: points out and which carries obligations infrastructure scanning does not.
 PERSONAL_TYPES = frozenset(
-    {TargetType.EMAIL, TargetType.USERNAME, TargetType.PHONE, TargetType.PERSON}
+    {
+        TargetType.EMAIL,
+        TargetType.USERNAME,
+        TargetType.PHONE,
+        TargetType.PERSON,
+        # A photograph is about a person more often than not, and its metadata
+        # can place one at a time and place -- so it gets the same warning.
+        TargetType.IMAGE,
+    }
 )
+
+#: File suffixes accepted as image targets.
+IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".heic"})
 
 # A hostname label: alphanumerics and hyphens, not starting or ending with one.
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -119,6 +133,11 @@ class Target:
         return self.type in PERSONAL_TYPES
 
 
+def _image_suffix(value: str) -> bool:
+    """Whether ``value`` names a file with an image extension."""
+    return Path(value).suffix.lower() in IMAGE_SUFFIXES
+
+
 def phone_digits(value: str) -> str:
     """The digits of ``value``, with ``00`` international prefixes normalised.
 
@@ -151,6 +170,11 @@ def detect_target_type(value: str) -> TargetType:
     candidate = value.strip()
     if not candidate:
         raise TargetError("Enter a target to scan.")
+
+    if _image_suffix(candidate):
+        if not Path(candidate).expanduser().is_file():
+            raise TargetError(f"No such image file: {candidate}")
+        return TargetType.IMAGE
 
     if "://" in candidate:
         parts = urlsplit(candidate)
@@ -211,6 +235,8 @@ def parse_target(value: str) -> Target:
         # promoted to an international one.
         digits = phone_digits(raw)
         normalised = f"+{digits}" if raw.lstrip().startswith(("+", "00")) else digits
+    elif target_type is TargetType.IMAGE:
+        normalised = str(Path(raw).expanduser().resolve())
     elif target_type is TargetType.PERSON:
         # Names keep their capitalisation; collapsing runs of whitespace is the
         # only tidying that is safe to do.

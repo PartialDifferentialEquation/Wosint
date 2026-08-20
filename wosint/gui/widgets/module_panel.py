@@ -138,7 +138,9 @@ class ModulePanel(QWidget):
         kind = self._target.type.label.lower()
         message = f"{runnable} of {len(applicable)} modules can run against this {kind}"
         if unavailable:
-            message += f" · {unavailable} need tools that are not installed"
+            # Not always a missing tool: a module can also be waiting on an API
+            # key or a contact address, and the tooltip says which.
+            message += f" · {unavailable} unavailable, hover to see why"
         if self._target.is_personal:
             # Worth saying plainly: scanning a person is scanning personal data,
             # and most of these modules disclose the target to a third party in

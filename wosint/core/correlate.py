@@ -61,9 +61,13 @@ LABEL_TYPES: dict[str, EntityType] = {
     "docket": EntityType.DOCUMENT,
     "wikidata item": EntityType.DOCUMENT,
     "official website": EntityType.URL,
+    "handle": EntityType.USERNAME,
+    "camera serial": EntityType.DOCUMENT,
+    "gps position": EntityType.LOCATION,
+    "artist": EntityType.PERSON_NAME,
+    "owner": EntityType.PERSON_NAME,
     "blog": EntityType.URL,
     "linked site": EntityType.URL,
-    "profile url": EntityType.URL,
 }
 
 #: Categories whose findings describe accounts on a platform.
@@ -103,6 +107,13 @@ SKIP_LABELS = frozenset(
         "sub-address tag",
         "gravatar",
         "avatar",
+        # Links we constructed from a finding, rather than found in one.
+        "map",
+        "docket record",
+        "filer profile",
+        "officer record",
+        "wikidata page",
+        "profile url",
     }
 )
 

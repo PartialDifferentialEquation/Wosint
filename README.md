@@ -14,6 +14,12 @@ noting that the target is a person:
 
 ![Wosint scanning a phone number](docs/screenshot-phone.png)
 
+The Profile tab, after following a lead from an email address to a username —
+the handle is at 80% because two modules found it from two different starting
+points:
+
+![The Profile tab](docs/screenshot-profile.png)
+
 ## Why
 
 Reconnaissance normally means running half a dozen tools by hand and reading
@@ -22,7 +28,9 @@ one target and folds the results into a common shape, while keeping every
 tool's raw output one click away.
 
 It handles both halves of a normal investigation: infrastructure (domains, IP
-addresses, URLs) and people (email addresses, usernames, phone numbers, names).
+addresses, URLs) and people (email addresses, usernames, phone numbers, names,
+photographs). Findings from every scan are correlated into one profile, so
+following a lead adds to the picture instead of starting a new one.
 
 Modules come in three kinds and the interface treats them identically:
 
@@ -73,7 +81,8 @@ wosint scan example.com -m dns -m rdap     # just these two
 wosint scan 1.2.3.4 --json > scan.json     # machine-readable
 wosint scan bob@example.com                # email: provider, profiles, accounts
 wosint scan "+1 415 555 0100" -m phone     # offline number analysis
-wosint scan "Ada Lovelace"                 # person: search starting points
+wosint scan "Ada Lovelace"                 # person: records, filings, dockets
+wosint scan ~/photos/IMG_4021.jpg -m exif  # offline image metadata
 wosint modules                             # catalogue and availability
 ```
 
@@ -92,6 +101,7 @@ it is not shown.
 | `some_user` | Username |
 | `+1 415 555 0100`, `(415) 555-0100`, `00 44 20 7183 8750` | Phone number |
 | `Ada Lovelace`, `Renée O'Brien` | Person |
+| `~/photos/IMG_4021.jpg` | Image (the file must exist) |
 
 Classification is deliberately conservative where two readings are possible. A
 dotted number like `415.555.0100` is a phone number rather than a domain, since
@@ -135,9 +145,22 @@ Person-oriented modules:
 | `maigret` | cli | username, email | Wide username search that also extracts profile details |
 | `phoneinfoga` | cli | phone | Online scanner results for a number |
 
-The three `local` modules never touch the network. `email`, `phone` and `links`
-therefore work offline, and give you something to go on before deciding whether
-to make any outbound query at all.
+Public records and images:
+
+| Module | Kind | Targets | What it finds |
+| --- | --- | --- | --- |
+| `exif` | local | image | GPS position, timestamps, camera, serial numbers, authorship |
+| `records` | local | person, domain, email | Search URLs for registries that have no API |
+| `wikidata` | api | person, username | Structured biography and self-declared accounts |
+| `sec` | api | person, domain, email | US securities filings naming a person or company |
+| `courtlistener` | api | person, domain | US federal and state court dockets |
+| `opensanctions` | api | person, domain | Sanctions, watchlist and PEP entries (needs a key) |
+| `opencorporates` | api | person | Directorships and officerships (needs a key) |
+| `vision` | api | image | Text, handles, signage and context read out of a photo (needs a key) |
+
+The `local` modules never touch the network. `email`, `phone`, `links`, `exif`
+and `records` therefore work offline, and give you something to go on before
+deciding whether to make any outbound query at all.
 
 CLI modules are optional. Install only the ones you want:
 
@@ -162,6 +185,59 @@ tool's untouched output, so nothing is hidden behind the parser. Double-click
 any cell to copy it. `Ctrl+S` exports the whole scan as JSON; the Export menu
 also writes the visible findings to CSV.
 
+### Building a picture
+
+The **Profile** tab is where separate scans become one subject. Every finding is
+read for the *thing* it was about — a name, an address, a handle, an employer, a
+location — and those are normalised and merged, so `Bob@Example.COM` from a
+Gravatar profile and `bob@example.com` from a GitHub profile become one entity
+with two sources rather than two rows.
+
+Confidence counts **independent corroboration**, not repetition: one module
+saying something six times is still one source, while two modules reaching it
+from two different starting points is a genuine cross-check. Hovering an entity
+shows every claim behind it and which module made it — nothing in a profile is
+unattributable.
+
+**Follow next** lists the identifiers found so far. Double-click one and Wosint
+scans it and folds the results into the same profile, so a chain like
+
+```
+bob@example.com  →  Gravatar profile  →  linked GitHub account
+                 →  handle "bobsmith"  →  rescan  →  employer, location, more accounts
+```
+
+happens in four clicks, with each step recorded.
+
+#### Inferences are marked, and never chained
+
+Some findings rest on a guess. Trying an email's local part as a GitHub handle
+sometimes finds the right person and sometimes finds a stranger who happens to
+share it; a name matching a court docket may be a different person entirely.
+Wosint marks those claims as **inferred**: they are shown greyed and italic as
+unconfirmed, they are capped at low confidence however many modules repeat them,
+and they are **never offered as pivots** — because chaining a scan off a guess is
+exactly how two people get merged into one profile. A single confirmed source
+promotes an inferred entity to a real one.
+
+### Images
+
+Point Wosint at a photograph and it reads what the file already carries: GPS
+position, timestamps, camera model and serial number, and any authorship fields
+the camera or editor wrote. That runs entirely offline, and a recorded position
+is flagged as a warning because it places someone somewhere at a time.
+
+The `vision` module additionally asks Claude to read the picture for
+**identifiers that can be looked up** — text on signage, a handle visible on a
+screen, a company on a vehicle, a recognisable street. Those feed the same
+profile as everything else, always marked as inferred.
+
+It does not do face recognition. Claude is instructed not to identify anyone
+from their face and not to guess at protected characteristics, and no biometric
+data is extracted or stored. Wosint links on what an image *says*, not on who it
+*shows* — face matching against a person is the capability that turns an OSINT
+tool into a surveillance one, and it is deliberately absent.
+
 ## Configuration
 
 Settings live in `~/.config/wosint/config.json` and every value can be
@@ -184,7 +260,12 @@ overridden by an environment variable:
 | `WOSINT_HTTP_TIMEOUT` | Per-request timeout for API modules |
 | `WOSINT_DISABLED_MODULES` | Comma-separated modules to hide entirely |
 | `WOSINT_PHONE_REGION` | Two-letter region for numbers typed without a country code |
+| `WOSINT_CONTACT_EMAIL` | Contact address for registries that require one (the SEC) |
 | `WOSINT_KEY_<MODULE>` | API key for a module that needs one, e.g. `WOSINT_KEY_HIBP` |
+
+Modules needing a key: `hibp`, `opensanctions`, `opencorporates`, and `vision`
+(`WOSINT_KEY_VISION`, or the usual `ANTHROPIC_API_KEY`). `courtlistener` works
+without one; a token only raises its rate limit.
 
 A malformed config file is ignored rather than fatal — Wosint starts with
 defaults instead of refusing to open over a stray comma.
@@ -194,6 +275,7 @@ defaults instead of refusing to open over a stray comma.
 ```
 wosint/
   core/         the engine: targets, models, registry, runner, subprocess and HTTP helpers
+                plus entities.py and correlate.py, which merge findings into a profile
   modules/      one file per source, all behind the same Module interface
   gui/          the only package that imports Qt
   cli.py        headless interface over the same engine
@@ -256,3 +338,9 @@ selected modules would disclose that person to a third party just by asking
 about them. Have a reason, keep the results no longer than you need them, and do
 not use this to build a profile of someone who has not consented and whom you
 have no authorisation to investigate.
+
+Correlation raises the stakes rather than lowering them. Individually harmless
+facts become a profile once they are joined up, and that assembly is the step
+regulators treat as processing — which is why every entity keeps its sources,
+why guesses are marked and never chained, and why you should delete an
+investigation when it is done.
