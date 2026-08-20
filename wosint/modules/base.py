@@ -1,13 +1,15 @@
 """Base classes every OSINT module builds on.
 
-Two shapes cover everything Wosint does today:
+Three shapes cover everything Wosint does today:
 
 * :class:`CliModule` shells out to a locally installed tool and parses its
   output.
 * :class:`ApiModule` queries a public HTTP endpoint.
+* :class:`LocalModule` works the target out on this machine and sends nothing
+  anywhere.
 
-Both produce the same :class:`~wosint.core.models.Finding` objects, so the rest
-of the application never needs to care which kind it is looking at.
+All three produce the same :class:`~wosint.core.models.Finding` objects, so the
+rest of the application never needs to care which kind it is looking at.
 """
 
 from __future__ import annotations
@@ -163,6 +165,19 @@ class CliModule(Module):
                 f"{(output.stderr or output.stdout).strip()[:300] or 'no output'}"
             )
         return result
+
+
+class LocalModule(Module):
+    """A module that analyses the target without contacting anything.
+
+    Phone number parsing and search-link building are pure computation. Marking
+    them as local rather than lumping them in with the API modules is what lets
+    the interface tell an analyst which modules leave the machine -- useful when
+    the target is a person and every outbound query is a disclosure.
+    """
+
+    kind: ClassVar[str] = "local"
+    reaches_network: ClassVar[bool] = False
 
 
 class ApiModule(Module):

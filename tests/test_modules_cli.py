@@ -206,3 +206,104 @@ def test_disabled_modules_report_as_unavailable() -> None:
     availability = get_module("dns").availability(Settings(disabled_modules=["dns"]))
     assert not availability.ok
     assert availability.reason == "disabled in settings"
+
+
+# -- holehe ------------------------------------------------------------------
+
+HOLEHE_OUTPUT = """\
+*********************
+   [email protected]
+*********************
+[+] instagram.com
+[+] spotify.com
+[-] twitter.com
+[x] pinterest.com
+"""
+
+
+def test_holehe_reports_hits_and_counts_unchecked_sites() -> None:
+    result = get_module("holehe").parse(out(HOLEHE_OUTPUT), parse_target("bob@example.com"))
+
+    sites = [f.label for f in result.findings if f.value == "account exists"]
+    assert sites == ["instagram.com", "spotify.com"]
+    assert values(result, "Accounts found") == ["2"]
+    assert values(result, "Unchecked sites") == ["1"]
+
+
+def test_holehe_hits_are_notable() -> None:
+    result = get_module("holehe").parse(out(HOLEHE_OUTPUT), parse_target("bob@example.com"))
+    assert result.findings[0].severity is Severity.NOTABLE
+
+
+def test_holehe_with_no_hits_is_empty() -> None:
+    result = get_module("holehe").parse(out("[-] twitter.com\n"), parse_target("bob@example.com"))
+    assert result.findings == []
+
+
+def test_holehe_passes_the_address_after_a_separator(ctx) -> None:
+    args = get_module("holehe").build_args(parse_target("bob@example.com"), ctx)
+    assert args[-2:] == ["--", "bob@example.com"]
+
+
+# -- maigret -----------------------------------------------------------------
+
+MAIGRET_NDJSON = """\
+not json at all
+{"site": "GitHub", "status": "claimed", "url_user": "https://github.com/some_user", \
+"ids": {"fullname": "Jane Doe", "location": "Berlin"}}
+{"site": "Twitter", "status": "available", "url_user": "https://x.com/some_user"}
+{"site": "Reddit", "status": "claimed", "url_user": "https://reddit.com/user/some_user", \
+"ids": {"fullname": "Jane Doe"}}
+"""
+
+
+def test_maigret_reads_only_claimed_accounts() -> None:
+    result = get_module("maigret").parse(out(MAIGRET_NDJSON), parse_target("some_user"))
+
+    accounts = [
+        f.label for f in result.findings if f.category == "account" and f.label != "Accounts found"
+    ]
+    assert accounts == ["GitHub", "Reddit"]
+
+
+def test_maigret_extracts_profile_details_without_duplicating_them() -> None:
+    result = get_module("maigret").parse(out(MAIGRET_NDJSON), parse_target("some_user"))
+
+    assert values(result, "Name") == ["Jane Doe"]  # reported by two sites, listed once
+    assert values(result, "Location") == ["Berlin"]
+
+
+def test_maigret_ignores_lines_that_are_not_json() -> None:
+    result = get_module("maigret").parse(out("garbage\n{broken\n"), parse_target("some_user"))
+    assert result.findings == []
+
+
+def test_maigret_requests_ndjson(ctx) -> None:
+    args = get_module("maigret").build_args(parse_target("some_user"), ctx)
+    assert args[args.index("-J") + 1] == "ndjson"
+
+
+# -- phoneinfoga -------------------------------------------------------------
+
+PHONEINFOGA_OUTPUT = """\
+Running local scan...
+Raw local: 04 55 50 01 00
+Country: United States (+1)
+Carrier: Example Telecom
+Line type: mobile
+Running googlesearch scan...
+https://www.google.com/search?q=%22%2B14155550100%22
+"""
+
+
+def test_phoneinfoga_extracts_known_fields() -> None:
+    result = get_module("phoneinfoga").parse(out(PHONEINFOGA_OUTPUT), parse_target("+14155550100"))
+
+    assert values(result, "Country") == ["United States (+1)"]
+    assert values(result, "Carrier") == ["Example Telecom"]
+    assert values(result, "Line type") == ["mobile"]
+
+
+def test_phoneinfoga_collects_footprint_links() -> None:
+    result = get_module("phoneinfoga").parse(out(PHONEINFOGA_OUTPUT), parse_target("+14155550100"))
+    assert any("google.com/search" in v for v in values(result, "Footprint link"))

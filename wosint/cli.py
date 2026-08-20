@@ -108,7 +108,7 @@ def _print_report(scan: Scan, stream: TextIO) -> None:
         for finding in by_category[category]:
             detail = f"  ({finding.detail})" if finding.detail else ""
             print(
-                f"  {colour[finding.severity]}{finding.label:<18}{finding.value}{detail}{reset}",
+                f"  {colour[finding.severity]}{finding.label:<20} {finding.value}{detail}{reset}",
                 file=stream,
             )
 

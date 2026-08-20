@@ -33,6 +33,9 @@ class Settings:
         max_concurrency: How many modules may run at once.
         http_timeout: Per-request timeout for API modules.
         user_agent: Sent with every outbound HTTP request.
+        phone_region: Two-letter region used to interpret phone numbers typed
+            without a country code. Empty means such numbers stay ambiguous
+            rather than being guessed at.
         api_keys: Keyed by module name, for modules that need credentials.
         disabled_modules: Module names never offered or run.
     """
@@ -41,6 +44,7 @@ class Settings:
     max_concurrency: int = 6
     http_timeout: float = 20.0
     user_agent: str = DEFAULT_USER_AGENT
+    phone_region: str = ""
     api_keys: dict[str, str] = field(default_factory=dict)
     disabled_modules: list[str] = field(default_factory=list)
 
@@ -70,6 +74,7 @@ class Settings:
             ("max_concurrency", int),
             ("http_timeout", float),
             ("user_agent", str),
+            ("phone_region", str),
         ):
             raw = os.environ.get(f"WOSINT_{name.upper()}")
             if raw:

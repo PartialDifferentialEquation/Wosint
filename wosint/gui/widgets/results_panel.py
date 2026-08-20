@@ -232,6 +232,13 @@ class ResultsPanel(QWidget):
 #: stylesheet adds, so text ends up elided by a pixel or two without this.
 COLUMN_PADDING = 16
 
+#: No fixed column may take more than this, however long its content is.
+MAX_FIXED_COLUMN_WIDTH = 260
+#: Width the value column is kept above while there is any give elsewhere.
+MIN_STRETCH_COLUMN_WIDTH = 320
+#: Floor a fixed column will not be shrunk below.
+MIN_COLUMN_WIDTH = 70
+
 
 def _configure_table(table: QTableView, *, stretch_column: int) -> None:
     """Apply the table conventions shared by both result tables."""
@@ -252,15 +259,39 @@ def _configure_table(table: QTableView, *, stretch_column: int) -> None:
 
 
 def _fit_columns(table: QTableView, *, stretch_column: int) -> None:
-    """Widen each fixed column to its content, with room for cell padding."""
+    """Size the fixed columns to their content, keeping the value column usable.
+
+    Fitting purely to content lets a few wide detail strings squeeze the
+    stretch column -- the one holding the finding itself -- down to nothing.
+    So each fixed column is capped, and if what remains for the value column is
+    still too narrow, the widest fixed columns give width back until it is not.
+    """
     model = table.model()
     if model is None:
         return
-    for column in range(model.columnCount()):
-        if column == stretch_column:
-            continue
-        width = max(table.sizeHintForColumn(column), _header_width(table, column))
-        table.setColumnWidth(column, width + COLUMN_PADDING)
+
+    fixed = [c for c in range(model.columnCount()) if c != stretch_column]
+    widths = {
+        column: min(
+            max(table.sizeHintForColumn(column), _header_width(table, column)) + COLUMN_PADDING,
+            MAX_FIXED_COLUMN_WIDTH,
+        )
+        for column in fixed
+    }
+
+    available = table.viewport().width()
+    if available > 0:
+        shortfall = (sum(widths.values()) + MIN_STRETCH_COLUMN_WIDTH) - available
+        while shortfall > 0:
+            widest = max(widths, key=lambda c: widths[c])
+            if widths[widest] <= MIN_COLUMN_WIDTH:
+                break
+            take = min(shortfall, widths[widest] - MIN_COLUMN_WIDTH)
+            widths[widest] -= take
+            shortfall -= take
+
+    for column, width in widths.items():
+        table.setColumnWidth(column, width)
 
 
 def _header_width(table: QTableView, column: int) -> int:

@@ -15,7 +15,22 @@ from .settings import Settings
 
 
 class HttpError(RuntimeError):
-    """Raised when a request fails or returns an unusable response."""
+    """Raised when a request fails or returns an unusable response.
+
+    Attributes:
+        status_code: The HTTP status, when the request reached the server at
+            all. Modules use this to tell "no such account" (404) apart from
+            "we were blocked or rate limited", which are very different answers
+            to report to an analyst.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def is_not_found(self) -> bool:
+        return self.status_code == 404
 
 
 def build_client(settings: Settings) -> httpx.AsyncClient:
@@ -51,6 +66,19 @@ async def get_text(client: httpx.AsyncClient, url: str, **kwargs: Any) -> str:
     return (await _get(client, url, **kwargs)).text
 
 
+async def head_ok(client: httpx.AsyncClient, url: str, **kwargs: Any) -> bool:
+    """Whether ``url`` exists, without downloading or raising.
+
+    Used for presence checks where a 404 is an ordinary answer rather than a
+    failure worth reporting.
+    """
+    try:
+        response = await client.get(url, **kwargs)
+    except httpx.HTTPError:
+        return False
+    return response.status_code < 400
+
+
 async def _get(client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
     try:
         response = await client.get(url, **kwargs)
@@ -60,5 +88,7 @@ async def _get(client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Resp
         detail = str(exc).strip() or type(exc).__name__
         raise HttpError(f"request to {url} failed: {detail}") from exc
     if response.status_code >= 400:
-        raise HttpError(f"{url} returned HTTP {response.status_code}")
+        raise HttpError(
+            f"{url} returned HTTP {response.status_code}", status_code=response.status_code
+        )
     return response

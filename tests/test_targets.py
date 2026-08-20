@@ -73,3 +73,91 @@ def test_is_ip() -> None:
     assert parse_target("1.2.3.4").is_ip
     assert parse_target("2001:db8::1").is_ip
     assert not parse_target("example.com").is_ip
+
+
+# -- phone numbers -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "+14155550100",
+        "+1 415 555 0100",
+        "(415) 555-0100",
+        "415.555.0100",
+        "00 44 20 7183 8750",
+        "555-1234",
+    ],
+)
+def test_detects_phone_numbers(value: str) -> None:
+    assert detect_target_type(value) is TargetType.PHONE
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("+1 (415) 555-0100", "+14155550100"),
+        ("00442071838750", "+442071838750"),
+        ("415.555.0100", "4155550100"),
+    ],
+)
+def test_normalises_phone_numbers(value: str, expected: str) -> None:
+    """A national number must not be silently promoted to an international one."""
+    assert parse_target(value).value == expected
+
+
+def test_phone_beats_domain_for_a_dotted_number() -> None:
+    assert detect_target_type("415.555.0100") is TargetType.PHONE
+
+
+def test_short_digit_runs_are_not_phone_numbers() -> None:
+    """Six digits is below the shortest real number, so it stays a username."""
+    assert detect_target_type("12345") is TargetType.USERNAME
+
+
+def test_over_length_digit_runs_are_not_phone_numbers() -> None:
+    """E.164 tops out at 15 digits."""
+    assert detect_target_type("1234567890123456") is TargetType.USERNAME
+
+
+# -- people ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["John Smith", "Ada Lovelace", "Jean-Luc Picard", "Renée O'Brien", "María José García Ruiz"],
+)
+def test_detects_person_names(value: str) -> None:
+    assert detect_target_type(value) is TargetType.PERSON
+
+
+def test_person_names_keep_their_capitalisation() -> None:
+    assert parse_target("  Ada   Lovelace  ").value == "Ada Lovelace"
+
+
+def test_a_single_word_is_read_as_a_username() -> None:
+    """One word is ambiguous; a handle is the more useful reading."""
+    assert detect_target_type("Ada") is TargetType.USERNAME
+
+
+@pytest.mark.parametrize(
+    ("value", "personal"),
+    [
+        ("bob@example.com", True),
+        ("some_user", True),
+        ("+14155550100", True),
+        ("Ada Lovelace", True),
+        ("example.com", False),
+        ("1.2.3.4", False),
+        ("https://example.com", False),
+    ],
+)
+def test_personal_targets_are_flagged(value: str, personal: bool) -> None:
+    assert parse_target(value).is_personal is personal
+
+
+def test_phone_digits_strips_formatting_and_prefixes() -> None:
+    from wosint.core.targets import phone_digits
+
+    assert phone_digits("+1 (415) 555-0100") == "14155550100"
+    assert phone_digits("00442071838750") == "442071838750"

@@ -342,3 +342,93 @@ def test_results_panel_switches_to_raw_output_for_a_module(qapp, findings) -> No
 
     assert panel.tabs.currentIndex() == 2
     assert panel.raw_view.toPlainText() == "raw dns output"
+
+
+# -- personal targets --------------------------------------------------------
+
+
+def test_target_bar_classifies_people_and_phone_numbers(qapp) -> None:
+    bar = TargetBar()
+
+    bar.input.setText("Ada Lovelace")
+    assert bar.badge.text() == "Person"
+
+    bar.input.setText("+1 415 555 0100")
+    assert bar.badge.text() == "Phone number"
+    assert bar.target.value == "+14155550100"
+
+
+def test_module_panel_offers_only_person_modules_for_a_name(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("Ada Lovelace"))
+
+    offered = {panel.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(panel.list.count())}
+    assert offered == {"links"}
+
+
+def test_module_panel_offers_phone_modules_for_a_number(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("+14155550100"))
+
+    offered = {panel.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(panel.list.count())}
+    assert {"phone", "links"} <= offered
+    assert "dns" not in offered
+
+
+def test_module_panel_warns_that_a_target_is_a_person(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("bob@example.com"))
+
+    assert "identifies a person" in panel.summary.text()
+    assert "run offline" in panel.summary.text()
+
+
+def test_module_panel_stays_quiet_for_infrastructure(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("example.com"))
+
+    assert "identifies a person" not in panel.summary.text()
+
+
+def test_module_panel_tooltip_says_what_leaves_the_machine(qapp) -> None:
+    panel = ModulePanel(Settings())
+    panel.set_target(parse_target("+14155550100"))
+
+    tooltips = {
+        panel.list.item(i).data(Qt.ItemDataRole.UserRole): panel.list.item(i).toolTip()
+        for i in range(panel.list.count())
+    }
+    assert "Runs offline" in tooltips["phone"]
+    assert "Runs offline" in tooltips["links"]
+
+
+def test_results_panel_keeps_the_value_column_usable(qapp) -> None:
+    """Long detail strings must not squeeze the column holding the finding."""
+    panel = ResultsPanel()
+    panel.resize(1100, 600)
+    panel.show()
+    QApplication.processEvents()
+    panel.reset([ModuleResult(module="links", title="Search links", kind="local")])
+    panel.apply_result(
+        ModuleResult(
+            module="links",
+            title="Search links",
+            kind="local",
+            status=ModuleStatus.OK,
+            findings=[
+                Finding(
+                    "search",
+                    "DuckDuckGo (digits only)",
+                    "https://duckduckgo.com/?q=%22" + "1" * 60 + "%22",
+                    "some listings omit the country code entirely, so search both ways",
+                )
+            ],
+        )
+    )
+
+    table = panel.findings_table
+    widths = [table.columnWidth(c) for c in range(6)]
+
+    assert widths[3] >= 300, f"value column squeezed to {widths[3]}px: {widths}"
+    # The value column must also end up the widest of them all.
+    assert widths[3] == max(widths)

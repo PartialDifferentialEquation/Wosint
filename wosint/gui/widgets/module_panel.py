@@ -113,7 +113,7 @@ class ModulePanel(QWidget):
             availability = module.availability(self.settings)
             item = QListWidgetItem(f"{module.title}  ·  {module.kind}")
             item.setData(Qt.ItemDataRole.UserRole, module.name)
-            tooltip = [module.description or module.title]
+            tooltip = [module.description or module.title, _reach(module)]
 
             if availability.ok:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -139,6 +139,15 @@ class ModulePanel(QWidget):
         message = f"{runnable} of {len(applicable)} modules can run against this {kind}"
         if unavailable:
             message += f" · {unavailable} need tools that are not installed"
+        if self._target.is_personal:
+            # Worth saying plainly: scanning a person is scanning personal data,
+            # and most of these modules disclose the target to a third party in
+            # the very act of asking about them.
+            offline = sum(1 for m in applicable if not m.reaches_network)
+            message += (
+                f"\n\nThis target identifies a person. {offline} of these modules "
+                "run offline; the rest disclose the target to the service they query."
+            )
         self.summary.setText(message)
         self.selection_changed.emit(self.selected_modules())
 
@@ -160,3 +169,13 @@ class ModulePanel(QWidget):
         else:
             self._deselected.add(name)
         self.selection_changed.emit(self.selected_modules())
+
+
+def _reach(module) -> str:
+    """One line describing what leaves the machine when this module runs."""
+    if not module.reaches_network:
+        return "Runs offline. Nothing about the target is sent anywhere."
+    source = getattr(module, "source_url", "") or getattr(module, "tool", "")
+    if module.kind == "cli":
+        return f"Runs {source} locally; that tool makes its own outbound requests."
+    return f"Queries {source or 'a third-party service'}, disclosing the target to it."
