@@ -20,11 +20,22 @@ GITHUB_USER_URL = "https://api.github.com/users/{username}"
 GITLAB_USER_URL = "https://gitlab.com/api/v4/users"
 
 
-def username_of(target: Target) -> str:
-    """The handle to look up: an email's local part is a good first guess."""
+#: Warning attached to every finding derived from a guessed handle.
+GUESS_NOTE = (
+    "handle guessed from the email local part -- this account may belong to someone else entirely"
+)
+
+
+def username_of(target: Target) -> tuple[str, bool]:
+    """The handle to look up, and whether we had to guess it.
+
+    An email's local part is a reasonable first guess at someone's handle, but
+    only a guess: plenty of people share a local part with a stranger's account
+    on any given platform. The caller needs to know which it got.
+    """
     if target.type is TargetType.EMAIL:
-        return target.value.split("@", 1)[0]
-    return target.value
+        return target.value.split("@", 1)[0], True
+    return target.value, False
 
 
 @register
@@ -39,7 +50,7 @@ class GitHubUserModule(ApiModule):
 
     async def execute(self, target: Target, ctx: RunContext) -> ModuleOutput:
         out = ModuleOutput()
-        username = username_of(target)
+        username, guessed = username_of(target)
 
         try:
             data = await get_json(ctx.client, GITHUB_USER_URL.format(username=username))
@@ -55,12 +66,14 @@ class GitHubUserModule(ApiModule):
             return out
 
         out.raw = json.dumps(data, indent=2, sort_keys=True)
+        note = GUESS_NOTE if guessed else "account exists"
         out.add(
             "account",
             "GitHub",
             str(data.get("html_url") or ""),
-            "account exists",
-            Severity.NOTABLE,
+            note,
+            Severity.NOTABLE if not guessed else Severity.INFO,
+            inferred=guessed,
         )
         for label, key, severity in (
             ("Name", "name", Severity.NOTABLE),
@@ -71,14 +84,22 @@ class GitHubUserModule(ApiModule):
             ("Bio", "bio", Severity.INFO),
             ("Twitter", "twitter_username", Severity.NOTABLE),
         ):
-            out.add("profile", label, _text(data, key), severity=severity)
+            out.add(
+                "profile",
+                label,
+                _text(data, key),
+                GUESS_NOTE if guessed else "",
+                Severity.INFO if guessed else severity,
+                inferred=guessed,
+            )
 
-        out.add("profile", "Joined", str(data.get("created_at") or "")[:10])
+        out.add("profile", "Joined", str(data.get("created_at") or "")[:10], inferred=guessed)
         out.add(
             "profile",
             "Public repositories",
             str(data.get("public_repos") or 0),
             f"{data.get('followers', 0)} followers",
+            inferred=guessed,
         )
         return out
 
@@ -95,24 +116,41 @@ class GitLabUserModule(ApiModule):
 
     async def execute(self, target: Target, ctx: RunContext) -> ModuleOutput:
         out = ModuleOutput()
-        username = username_of(target)
+        username, guessed = username_of(target)
 
         data = await get_json(ctx.client, GITLAB_USER_URL, params={"username": username})
         if not isinstance(data, list) or not data:
             out.raw = f"no GitLab account named {username}"
             return out
 
-        user = data[0]
+        # The endpoint is a search, not a lookup: confirm it really returned the
+        # handle we asked about before attributing the profile to anyone.
+        user = next(
+            (u for u in data if str(u.get("username", "")).lower() == username.lower()), None
+        )
+        if user is None:
+            out.raw = f"no exact GitLab match for {username}"
+            return out
+
         out.raw = json.dumps(data, indent=2, sort_keys=True)
+        note = GUESS_NOTE if guessed else "account exists"
         out.add(
             "account",
             "GitLab",
             str(user.get("web_url") or ""),
-            "account exists",
-            Severity.NOTABLE,
+            note,
+            Severity.INFO if guessed else Severity.NOTABLE,
+            inferred=guessed,
         )
-        out.add("profile", "Name", _text(user, "name"), severity=Severity.NOTABLE)
-        out.add("profile", "State", _text(user, "state"))
+        out.add(
+            "profile",
+            "Name",
+            _text(user, "name"),
+            GUESS_NOTE if guessed else "",
+            Severity.INFO if guessed else Severity.NOTABLE,
+            inferred=guessed,
+        )
+        out.add("profile", "State", _text(user, "state"), inferred=guessed)
         return out
 
 

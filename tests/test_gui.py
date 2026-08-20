@@ -432,3 +432,146 @@ def test_results_panel_keeps_the_value_column_usable(qapp) -> None:
     assert widths[3] >= 300, f"value column squeezed to {widths[3]}px: {widths}"
     # The value column must also end up the widest of them all.
     assert widths[3] == max(widths)
+
+
+# -- profile panel -----------------------------------------------------------
+
+
+def profile_scan(target: str, module: str, findings_list):
+    from wosint.core.models import Scan
+    from wosint.core.targets import parse_target as _parse
+
+    scan = Scan(target=_parse(target))
+    scan.results[module] = ModuleResult(
+        module=module, title=module, kind="api", status=ModuleStatus.OK, findings=findings_list
+    )
+    scan.finished_at = scan.started_at
+    return scan
+
+
+def test_profile_panel_starts_empty(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    assert panel.tree.topLevelItemCount() == 0
+    assert "Nothing scanned" in panel.heading.text()
+
+
+def test_profile_panel_groups_entities_by_type(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan(
+            "bob@example.com",
+            "gravatar",
+            [
+                Finding("profile", "Full name", "Jane Doe"),
+                Finding("account", "Github", "https://github.com/janedoe"),
+            ],
+        )
+    )
+
+    groups = {
+        panel.tree.topLevelItem(i).text(0).split("  (")[0]
+        for i in range(panel.tree.topLevelItemCount())
+    }
+    assert {"Name", "Email address", "Username", "Account"} <= groups
+
+
+def test_profile_panel_accumulates_across_scans(qapp) -> None:
+    """The point of the panel: a second scan adds to the picture."""
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan("bob@example.com", "gravatar", [Finding("profile", "Full name", "Jane Doe")])
+    )
+    panel.add_scan(profile_scan("janedoe", "github", [Finding("profile", "Location", "Berlin")]))
+
+    assert panel.investigation.scanned == ["bob@example.com", "janedoe"]
+    assert "2 scans" in panel.subheading.text()
+
+
+def test_profile_panel_lists_pivots_and_marks_scanned_ones(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan(
+            "bob@example.com",
+            "gravatar",
+            [Finding("account", "Github", "https://github.com/janedoe")],
+        )
+    )
+
+    rows = [
+        panel.pivot_tree.topLevelItem(i).text(0)
+        for i in range(panel.pivot_tree.topLevelItemCount())
+    ]
+    assert any("janedoe" in row for row in rows)
+    reasons = [
+        panel.pivot_tree.topLevelItem(i).text(1)
+        for i in range(panel.pivot_tree.topLevelItemCount())
+    ]
+    assert any("already scanned" in reason for reason in reasons)
+
+
+def test_profile_panel_emits_the_chosen_pivot(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan(
+            "bob@example.com",
+            "gravatar",
+            [Finding("account", "Github", "https://github.com/janedoe")],
+        )
+    )
+    emitted = []
+    panel.pivot_requested.connect(emitted.append)
+
+    for i in range(panel.pivot_tree.topLevelItemCount()):
+        item = panel.pivot_tree.topLevelItem(i)
+        if "janedoe" in item.text(0):
+            panel.pivot_tree.setCurrentItem(item)
+            break
+    panel.follow_button.click()
+
+    assert [p.value for p in emitted] == ["janedoe"]
+
+
+def test_profile_panel_shows_inferred_entities_as_unconfirmed(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan(
+            "beau@example.com",
+            "gitlab",
+            [Finding("profile", "Name", "Somebody Else", "guessed", inferred=True)],
+        )
+    )
+
+    for i in range(panel.tree.topLevelItemCount()):
+        group = panel.tree.topLevelItem(i)
+        if group.text(0).startswith("Name"):
+            child = group.child(0)
+            assert child.text(2) == "inferred, unconfirmed"
+            assert child.font(0).italic()
+            assert "may belong to a different person" in child.toolTip(0)
+            return
+    pytest.fail("no name group rendered")
+
+
+def test_profile_panel_reset_clears_everything(qapp) -> None:
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(
+        profile_scan("bob@example.com", "gravatar", [Finding("profile", "Full name", "Jane Doe")])
+    )
+    panel.reset()
+
+    assert panel.tree.topLevelItemCount() == 0
+    assert panel.investigation.entities == {}

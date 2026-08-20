@@ -321,12 +321,17 @@ async def test_github_uses_an_email_local_part_as_the_handle(ctx) -> None:
 
 
 @respx.mock
-async def test_gitlab_reads_the_first_matching_user(ctx) -> None:
+async def test_gitlab_reads_the_matching_user(ctx) -> None:
     respx.get("https://gitlab.com/api/v4/users").mock(
         return_value=httpx.Response(
             200,
             json=[
-                {"web_url": "https://gitlab.com/some_user", "name": "Jane Doe", "state": "active"}
+                {
+                    "username": "some_user",
+                    "web_url": "https://gitlab.com/some_user",
+                    "name": "Jane Doe",
+                    "state": "active",
+                }
             ],
         )
     )
@@ -335,6 +340,71 @@ async def test_gitlab_reads_the_first_matching_user(ctx) -> None:
 
     assert found["GitLab"] == "https://gitlab.com/some_user"
     assert found["Name"] == "Jane Doe"
+
+
+@respx.mock
+async def test_gitlab_refuses_a_near_match(ctx) -> None:
+    """The endpoint is a search: a different handle is a different person."""
+    respx.get("https://gitlab.com/api/v4/users").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "username": "someone_else",
+                    "web_url": "https://gitlab.com/someone_else",
+                    "name": "Not Jane",
+                }
+            ],
+        )
+    )
+    output = await get_module("gitlab").execute(parse_target("some_user"), ctx)
+
+    assert output.findings == []
+
+
+# -- guessed handles ---------------------------------------------------------
+
+
+@respx.mock
+async def test_a_handle_guessed_from_an_email_is_marked_inferred(ctx) -> None:
+    """Scanning an email guesses the handle, and every finding must say so."""
+    respx.get("https://api.github.com/users/beau").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "login": "beau",
+                "html_url": "https://github.com/beau",
+                "name": "Somebody Else",
+            },
+        )
+    )
+    output = await get_module("github").execute(parse_target("beau@example.com"), ctx)
+
+    assert output.findings
+    assert all(f.inferred for f in output.findings)
+    assert "may belong to someone else" in first(output, "GitHub").detail
+
+
+@respx.mock
+async def test_a_handle_given_directly_is_not_marked_inferred(ctx) -> None:
+    respx.get("https://api.github.com/users/some_user").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "login": "some_user",
+                "html_url": "https://github.com/some_user",
+                "name": "Jane Doe",
+            },
+        )
+    )
+    output = await get_module("github").execute(parse_target("some_user"), ctx)
+
+    assert not any(f.inferred for f in output.findings)
+
+
+async def test_a_probable_name_from_an_email_is_marked_inferred(ctx) -> None:
+    output = await get_module("email").execute(parse_target("jane.doe@acmecorp.com"), ctx)
+    assert first(output, "Probable name").inferred
 
 
 @respx.mock

@@ -181,6 +181,7 @@ class EmailProfileModule(LocalModule):
                     f"inferred from the {separator!r}-separated local part; the "
                     f"convention is likely first{separator}last@{domain}",
                     Severity.NOTABLE,
+                    inferred=True,
                 )
                 return
 

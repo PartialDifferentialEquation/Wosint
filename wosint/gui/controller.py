@@ -51,6 +51,12 @@ class ScanController(QObject):
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._future: Future | None = None
+        #: Whether a scan is in flight. Tracked explicitly rather than read off
+        #: the future, because the terminal signals are emitted from *inside*
+        #: the coroutine -- so the future is still "not done" while a handler
+        #: reacting to scan_finished runs, and anything gated on it would be
+        #: wrongly refused at exactly the moment the user acts on a result.
+        self._active = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -96,7 +102,7 @@ class ScanController(QObject):
 
     @property
     def is_scanning(self) -> bool:
-        return self._future is not None and not self._future.done()
+        return self._active
 
     def submit(self, target: Target, modules: Iterable[str] | None = None) -> None:
         """Queue a scan of ``target``.
@@ -115,6 +121,7 @@ class ScanController(QObject):
     def cancel(self) -> None:
         """Cancel the running scan, if there is one."""
         future, self._future = self._future, None
+        self._active = False
         if future is not None and not future.done():
             future.cancel()
 

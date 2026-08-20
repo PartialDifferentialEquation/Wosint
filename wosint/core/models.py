@@ -76,6 +76,12 @@ class Finding:
         value: The observation itself.
         detail: Optional supporting context shown next to the value.
         severity: Notability of the observation.
+        inferred: Whether this rests on a guess rather than on the source
+            actually saying so. A GitHub profile found by trying an email's
+            local part as a handle describes *a* person, but not necessarily
+            the one being investigated -- and correlation has to know the
+            difference, or one common handle quietly merges two strangers into
+            a single profile.
     """
 
     category: str
@@ -83,6 +89,7 @@ class Finding:
     value: str
     detail: str = ""
     severity: Severity = Severity.INFO
+    inferred: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +98,7 @@ class Finding:
             "value": self.value,
             "detail": self.detail,
             "severity": self.severity.value,
+            "inferred": self.inferred,
         }
 
 

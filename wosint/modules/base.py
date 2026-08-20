@@ -52,8 +52,13 @@ class ModuleOutput:
         value: str,
         detail: str = "",
         severity: Severity = Severity.INFO,
+        inferred: bool = False,
     ) -> None:
-        """Append a finding, ignoring blank values."""
+        """Append a finding, ignoring blank values.
+
+        Set ``inferred`` when the finding rests on a guess -- an identifier the
+        module worked out rather than one the source confirmed.
+        """
         value = (value or "").strip()
         if not value:
             return
@@ -64,6 +69,7 @@ class ModuleOutput:
                 value=value,
                 detail=detail.strip(),
                 severity=severity,
+                inferred=inferred,
             )
         )
 

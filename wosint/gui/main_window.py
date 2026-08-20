@@ -25,6 +25,7 @@ from ..core.settings import Settings
 from ..core.targets import Target
 from .controller import ScanController
 from .widgets.module_panel import ModulePanel
+from .widgets.profile_panel import ProfilePanel
 from .widgets.results_panel import ResultsPanel
 from .widgets.target_bar import TargetBar
 
@@ -50,6 +51,8 @@ class MainWindow(QMainWindow):
         self.target_bar = TargetBar()
         self.module_panel = ModulePanel(self.settings)
         self.results_panel = ResultsPanel()
+        self.profile_panel = ProfilePanel()
+        self.results_panel.tabs.addTab(self.profile_panel, "Profile")
 
         self._build_layout()
         self._build_menu()
@@ -120,6 +123,10 @@ class MainWindow(QMainWindow):
         csv_action.triggered.connect(self._export_csv)
         export_menu.addAction(csv_action)
 
+        profile_action = QAction("Export &profile as JSON…", self)
+        profile_action.triggered.connect(self._export_profile)
+        export_menu.addAction(profile_action)
+
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction("&About Wosint", self)
         about.triggered.connect(self._show_about)
@@ -146,6 +153,10 @@ class MainWindow(QMainWindow):
         self.results_panel.status_message.connect(
             lambda text: self.statusBar().showMessage(text, STATUS_TIMEOUT_MS)
         )
+        self.profile_panel.status_message.connect(
+            lambda text: self.statusBar().showMessage(text, STATUS_TIMEOUT_MS)
+        )
+        self.profile_panel.pivot_requested.connect(self._follow_pivot)
         self.module_panel.selection_changed.connect(self._on_selection_changed)
 
     # -- scan lifecycle ----------------------------------------------------
@@ -196,6 +207,12 @@ class MainWindow(QMainWindow):
             self.summary_label.setText("Scan cancelled.")
             return
 
+        # The engine's own copy of a scan only carries results it managed to
+        # store; the live ones are what the user actually saw, so correlate
+        # those. This also means a partial scan still contributes.
+        scan.results.update(self._live_results)
+        self.profile_panel.add_scan(scan)
+
         findings = sum(r.finding_count for r in self._live_results.values())
         failed = [r for r in self._live_results.values() if r.status is ModuleStatus.ERROR]
         parts = [
@@ -211,6 +228,29 @@ class MainWindow(QMainWindow):
         self._set_scanning(False)
         self.summary_label.setText("Scan failed.")
         QMessageBox.warning(self, "Scan failed", message)
+
+    def _follow_pivot(self, pivot) -> None:
+        """Scan a pivot the analyst picked out of the profile.
+
+        The target box is filled in as though they had typed it, so the module
+        selection updates to match and the action stays inspectable rather than
+        happening invisibly.
+        """
+        if self.controller.is_scanning:
+            self.statusBar().showMessage(
+                "A scan is already running — stop it first.", STATUS_TIMEOUT_MS
+            )
+            return
+
+        self.target_bar.input.setText(pivot.value)
+        if self.target_bar.target is None:
+            self.statusBar().showMessage(
+                f"{pivot.value!r} cannot be scanned directly.", STATUS_TIMEOUT_MS
+            )
+            return
+
+        self.statusBar().showMessage(f"Following {pivot.value}…", STATUS_TIMEOUT_MS)
+        self._start_scan()
 
     def _on_selection_changed(self, names: list[str]) -> None:
         if self.controller.is_scanning:
@@ -287,6 +327,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export failed", str(exc))
             return
         self.statusBar().showMessage(f"Exported {len(rows)} findings to {path}", STATUS_TIMEOUT_MS)
+
+    def _export_profile(self) -> None:
+        """Write the correlated profile, with the provenance behind each entity."""
+        investigation = self.profile_panel.investigation
+        if not investigation.entities:
+            self.statusBar().showMessage("Nothing in the profile yet.", STATUS_TIMEOUT_MS)
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export profile", "profile.json", "JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(json.dumps(investigation.as_dict(), indent=2), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Exported profile to {path}", STATUS_TIMEOUT_MS)
 
     def _show_about(self) -> None:
         from .. import __version__
