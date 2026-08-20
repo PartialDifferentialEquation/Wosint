@@ -50,6 +50,17 @@ LABEL_TYPES: dict[str, EntityType] = {
     "abuse contact": EntityType.EMAIL,
     "breach": EntityType.BREACH,
     "domain": EntityType.DOMAIN,
+    "named in filing by": EntityType.ORGANISATION,
+    "officer of": EntityType.ORGANISATION,
+    "employer": EntityType.ORGANISATION,
+    "educated at": EntityType.ORGANISATION,
+    "listed person": EntityType.PERSON_NAME,
+    "citizenship": EntityType.LOCATION,
+    "place of birth": EntityType.LOCATION,
+    "listed country": EntityType.LOCATION,
+    "docket": EntityType.DOCUMENT,
+    "wikidata item": EntityType.DOCUMENT,
+    "official website": EntityType.URL,
     "blog": EntityType.URL,
     "linked site": EntityType.URL,
     "profile url": EntityType.URL,
@@ -502,6 +513,9 @@ def _infer_type(finding: Finding) -> EntityType | None:
         return None
     if finding.category == "search":
         # Search links are starting points we built ourselves, not evidence.
+        return None
+    if finding.category == "records" and is_url(value):
+        # A registry search URL is a place to look, not something found there.
         return None
     if EMAIL_IN_TEXT.fullmatch(value):
         return EntityType.EMAIL

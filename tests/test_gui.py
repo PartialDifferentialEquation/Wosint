@@ -363,7 +363,9 @@ def test_module_panel_offers_only_person_modules_for_a_name(qapp) -> None:
     panel.set_target(parse_target("Ada Lovelace"))
 
     offered = {panel.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(panel.list.count())}
-    assert offered == {"links"}
+    assert {"links", "records", "wikidata", "sec", "courtlistener"} <= offered
+    # Nothing that only makes sense against infrastructure.
+    assert not offered & {"dns", "crtsh", "geoip", "whois", "phone"}
 
 
 def test_module_panel_offers_phone_modules_for_a_number(qapp) -> None:

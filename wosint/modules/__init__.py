@@ -14,7 +14,9 @@ from . import (
     api_hackertarget,
     api_hibp,
     api_rdap,
+    api_records,
     api_wayback,
+    api_wikidata,
     cli_dig,
     cli_holehe,
     cli_maigret,
@@ -26,6 +28,7 @@ from . import (
     local_email,
     local_links,
     local_phone,
+    local_records,
 )
 from .base import ApiModule, CliModule, LocalModule, Module, ModuleOutput, RunContext
 
