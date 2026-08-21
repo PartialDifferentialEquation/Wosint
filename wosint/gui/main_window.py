@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -24,6 +25,7 @@ from ..core.registry import modules_for
 from ..core.settings import Settings
 from ..core.targets import Target
 from .controller import ScanController
+from .settings_dialog import SettingsDialog
 from .widgets.module_panel import ModulePanel
 from .widgets.profile_panel import ProfilePanel
 from .widgets.results_panel import ResultsPanel
@@ -107,6 +109,11 @@ class MainWindow(QMainWindow):
         focus.triggered.connect(self.target_bar.focus)
         scan_menu.addAction(focus)
 
+        open_image = QAction("&Open photo…", self)
+        open_image.setShortcut(QKeySequence.StandardKey.Open)
+        open_image.triggered.connect(self.target_bar.browse_for_image)
+        scan_menu.addAction(open_image)
+
         scan_menu.addSeparator()
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
@@ -126,6 +133,13 @@ class MainWindow(QMainWindow):
         profile_action = QAction("Export &profile as JSON…", self)
         profile_action.triggered.connect(self._export_profile)
         export_menu.addAction(profile_action)
+
+        settings_menu = self.menuBar().addMenu("&Settings")
+        advanced = QAction("&Advanced settings…", self)
+        advanced.setShortcut(QKeySequence("Ctrl+,"))
+        advanced.setStatusTip("API keys, timeouts and which modules may run")
+        advanced.triggered.connect(self.open_settings)
+        settings_menu.addAction(advanced)
 
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction("&About Wosint", self)
@@ -256,7 +270,8 @@ class MainWindow(QMainWindow):
         if self.controller.is_scanning:
             return
         if self.target_bar.target is not None:
-            self.summary_label.setText(f"{len(names)} modules selected")
+            count = len(names)
+            self.summary_label.setText(f"{count} module{'s' if count != 1 else ''} selected")
 
     def _set_scanning(self, scanning: bool) -> None:
         self.target_bar.set_scanning(scanning)
@@ -327,6 +342,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export failed", str(exc))
             return
         self.statusBar().showMessage(f"Exported {len(rows)} findings to {path}", STATUS_TIMEOUT_MS)
+
+    def open_settings(self) -> None:
+        """Open the advanced settings dialog and apply what comes back.
+
+        The engine holds its own reference to the settings object, so editing it
+        in place is what makes a change take effect on the next scan without a
+        restart. A scan already running keeps the values it started with.
+        """
+        dialog = SettingsDialog(self.settings, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            path = self.settings.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save settings", str(exc))
+            return
+
+        # Availability changes with a new key, so the module list is stale now.
+        self.module_panel.set_target(self.target_bar.target)
+        self.statusBar().showMessage(f"Settings saved to {path}", STATUS_TIMEOUT_MS)
 
     def _export_profile(self) -> None:
         """Write the correlated profile, with the provenance behind each entity."""

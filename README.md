@@ -73,8 +73,22 @@ wosint              # or: python -m wosint
 ```
 
 Type a target and press Enter. Wosint classifies the input as you type — the
-badge next to the box shows whether `bob@example.com` was read as an email
-address or something else — and the sidebar narrows to the modules that apply.
+line under the box says how it was read — and the sidebar narrows to the modules
+that apply.
+
+Detection has to take the safest reading of an ambiguous string, which is not
+always the right one: `Beau` looks exactly like a username, and a bare run of
+digits looks like a phone number. The **type selector** beside the box overrules
+it, so you can say *this is a person's name* and have it treated as one. An
+override still has to be possible — forcing `not a domain!!` to be a domain is
+refused rather than producing a target no module can use.
+
+**Open photo…** (`Ctrl+O`) picks an image to examine, and a photo can be read
+for different things: pick **where it was taken** and the analysis prioritises
+street names, signage language, road markings, plate formats, architecture and
+vegetation; pick **the people in it** and it looks for name tags, employer
+logos, lanyards and event branding instead. Either way it reads what the picture
+*says*, never who it shows.
 
 The same engine runs from a terminal, which is useful for scripting and on
 machines without a display:
@@ -106,6 +120,8 @@ it is not shown.
 | `+1 415 555 0100`, `(415) 555-0100`, `00 44 20 7183 8750` | Phone number |
 | `Ada Lovelace`, `Renée O'Brien` | Person |
 | `~/photos/IMG_4021.jpg` | Image (the file must exist) |
+
+Any of these can also be chosen explicitly rather than detected.
 
 Classification is deliberately conservative where two readings are possible. A
 dotted number like `415.555.0100` is a phone number rather than a domain, since
@@ -243,6 +259,18 @@ data is extracted or stored. Wosint links on what an image *says*, not on who it
 tool into a surveillance one, and it is deliberately absent.
 
 ## Configuration
+
+**Settings → Advanced settings…** (`Ctrl+,`) is the easiest way in. It has three
+tabs: **API keys** for the modules that need one, **Scanning** for timeouts,
+concurrency and the details some sources insist on knowing about the caller, and
+**Modules** for switching a source off entirely so it never runs whatever the
+target.
+
+Keys you type are written to your own config file, which is created owner-only
+(`0600`) because it holds secrets. A key supplied through the environment is
+shown masked and marked *environment*, but cannot be edited there — the file
+value would be ignored on the next load, so accepting the edit would be a lie —
+and it is never copied into the file by a save.
 
 Settings live in `~/.config/wosint/config.json` and every value can be
 overridden by an environment variable:

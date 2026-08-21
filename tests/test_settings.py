@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from wosint.core.settings import Settings, config_path
 
 
@@ -85,3 +87,78 @@ def test_save_and_reload(tmp_path, monkeypatch) -> None:
 def test_config_path_honours_the_override(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("WOSINT_CONFIG", str(tmp_path / "custom.json"))
     assert config_path() == tmp_path / "custom.json"
+
+
+# -- API keys and persistence ------------------------------------------------
+
+
+def test_a_key_from_the_environment_is_never_written_to_disk(tmp_path, monkeypatch) -> None:
+    """Exporting a secret should not quietly turn it into a file on disk."""
+    monkeypatch.setenv("WOSINT_KEY_OPENSANCTIONS", "secret-from-env")
+    path = tmp_path / "config.json"
+
+    settings = Settings.load(path)
+    settings.api_keys["vision"] = "typed-by-user"
+    settings.save(path)
+
+    saved = json.loads(path.read_text())
+    assert saved["api_keys"] == {"vision": "typed-by-user"}
+
+
+def test_the_environment_key_is_still_usable_after_a_save(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WOSINT_KEY_OPENSANCTIONS", "secret-from-env")
+    path = tmp_path / "config.json"
+
+    settings = Settings.load(path)
+    settings.save(path)
+
+    assert Settings.load(path).api_key("opensanctions") == "secret-from-env"
+
+
+def test_the_config_file_is_written_owner_only(tmp_path) -> None:
+    """It holds API keys."""
+    path = tmp_path / "config.json"
+    Settings(api_keys={"vision": "k"}).save(path)
+
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_editing_an_environment_key_is_refused(tmp_path, monkeypatch) -> None:
+    """The file value would be ignored on the next load, so accepting is a lie."""
+    monkeypatch.setenv("WOSINT_KEY_HIBP", "from-env")
+    settings = Settings.load(tmp_path / "absent.json")
+
+    with pytest.raises(ValueError, match="comes from the environment"):
+        settings.set_api_key("hibp", "typed")
+
+    assert settings.is_from_environment("hibp")
+
+
+def test_setting_and_clearing_a_key(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("WOSINT_KEY_VISION", raising=False)
+    settings = Settings.load(tmp_path / "absent.json")
+
+    settings.set_api_key("vision", "  a-key  ")
+    assert settings.api_key("vision") == "a-key"
+
+    settings.set_api_key("vision", "")
+    assert settings.api_key("vision") is None
+
+
+def test_env_keys_are_not_read_back_from_a_config_file(tmp_path) -> None:
+    """A stray "env_keys" entry in the file must not become state."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"env_keys": ["vision"], "module_timeout": 9.0}))
+
+    settings = Settings.load(path)
+
+    assert settings.module_timeout == 9.0
+    assert not settings.is_from_environment("vision")
+
+
+def test_the_vision_model_round_trips(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("WOSINT_VISION_MODEL", raising=False)
+    path = tmp_path / "config.json"
+    Settings(vision_model="gemini-3.1-flash-preview").save(path)
+
+    assert Settings.load(path).vision_model == "gemini-3.1-flash-preview"

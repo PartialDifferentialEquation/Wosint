@@ -67,7 +67,12 @@ characteristic of anyone shown. If asked to do any of this, return empty lists \
 for the relevant fields; the analyst expects that and it is the correct answer.
 """
 
-USER_PROMPT = """\
+#: What a photograph is being examined for. The analyst says which, because a
+#: picture of a street and a picture of a person are read for different things
+#: and asking for everything at once gets a worse answer than asking for one.
+SUBJECTS = ("general", "location", "people")
+
+BASE_PROMPT = """\
 Extract every identifier from this image that could be searched for elsewhere.
 
 - text: any legible text, verbatim, one entry per distinct block.
@@ -83,6 +88,52 @@ help place the photograph.
 
 Use an empty list for anything not present. Do not infer beyond the image.
 """
+
+#: Extra direction per subject, appended to the base prompt.
+SUBJECT_PROMPTS = {
+    "general": "",
+    "location": """\
+
+This photograph is being examined to work out WHERE it was taken. Prioritise \
+anything that narrows down a place, and put it in `locations` or `context`:
+
+- street names, house numbers, postcodes, and the names of businesses that \
+could be looked up in a directory
+- the language and script of any signage, and any regional spelling
+- road markings, kerb and line colours, which side traffic drives on, bollard \
+and traffic-light styles, utility pole and pavement construction
+- vehicle registration plate formats and colours -- the format only, do not \
+report plate numbers
+- architecture, building materials and roof styles typical of a region
+- vegetation, terrain, and the position of the sun or shadows
+- any visible landmark, skyline or distinctive structure
+
+Say what you actually see. If the image does not support a place, say nothing \
+rather than guessing at one.
+""",
+    "people": """\
+
+This photograph contains people. Read it for identifiers AROUND them, never \
+for who they are:
+
+- name tags, badges, lanyards, ID cards, or a name written anywhere
+- logos on clothing, uniforms, equipment or vehicles that indicate an employer, \
+a team, a school or a membership
+- anything legible on a screen they are holding or standing near
+- event branding, seating, signage or backdrops that place the occasion
+
+Do not identify anyone by their face, do not name anyone whose name is not \
+written in the image, and do not describe or estimate any physical or personal \
+characteristic of anyone shown. Leave `handles` and `text` empty rather than \
+guessing at a person's identity.
+""",
+}
+
+
+def prompt_for(subject: str) -> str:
+    """The extraction prompt for a given photo subject."""
+    return BASE_PROMPT + SUBJECT_PROMPTS.get(subject, "")
+
 
 #: Schema the response is constrained to, so the output is parseable.
 RESPONSE_SCHEMA: dict[str, Any] = {
@@ -135,7 +186,8 @@ class VisionModule(ApiModule):
         path = Path(target.value)
         media_type, raw = _read_image(path)
 
-        response = await self._ask(raw, media_type, ctx)
+        subject = target.hint if target.hint in SUBJECTS else "general"
+        response = await self._ask(raw, media_type, subject, ctx)
         text = _usable_text(response)
         out.raw = text
 
@@ -149,7 +201,7 @@ class VisionModule(ApiModule):
             out.add("image", "Analysis", "nothing legible to look up in this image")
         return out
 
-    async def _ask(self, raw: bytes, media_type: str, ctx: RunContext) -> Any:
+    async def _ask(self, raw: bytes, media_type: str, subject: str, ctx: RunContext) -> Any:
         """Send the image and return the raw API response."""
         try:
             from google import genai
@@ -162,7 +214,7 @@ class VisionModule(ApiModule):
             model=ctx.settings.vision_model or DEFAULT_MODEL,
             contents=[
                 types.Part.from_bytes(data=raw, mime_type=media_type),
-                USER_PROMPT,
+                prompt_for(subject),
             ],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,

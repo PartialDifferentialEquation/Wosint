@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from wosint.core.targets import TargetError, TargetType, detect_target_type, parse_target
+from wosint.core.targets import (
+    TargetError,
+    TargetType,
+    coerce_target,
+    detect_target_type,
+    parse_target,
+)
 
 
 @pytest.mark.parametrize(
@@ -161,3 +167,58 @@ def test_phone_digits_strips_formatting_and_prefixes() -> None:
 
     assert phone_digits("+1 (415) 555-0100") == "14155550100"
     assert phone_digits("00442071838750") == "442071838750"
+
+
+# -- explicit type selection -------------------------------------------------
+
+
+def test_a_one_word_name_can_be_forced_to_a_person() -> None:
+    """Detection reads "Beau" as a username; being told otherwise settles it."""
+    assert detect_target_type("Beau") is TargetType.USERNAME
+    assert coerce_target("Beau", TargetType.PERSON).type is TargetType.PERSON
+
+
+def test_a_run_of_digits_can_be_forced_to_a_username() -> None:
+    assert detect_target_type("5551234") is TargetType.PHONE
+    assert coerce_target("5551234", TargetType.USERNAME).type is TargetType.USERNAME
+
+
+def test_coercion_still_normalises() -> None:
+    assert coerce_target("  Ada   Lovelace ", TargetType.PERSON).value == "Ada Lovelace"
+    assert coerce_target("Example.COM", TargetType.DOMAIN).value == "example.com"
+
+
+def test_a_bare_hostname_coerced_to_a_url_gains_a_scheme() -> None:
+    assert coerce_target("example.com", TargetType.URL).value == "https://example.com"
+
+
+@pytest.mark.parametrize(
+    ("value", "target_type"),
+    [
+        ("not a domain!!", TargetType.DOMAIN),
+        ("abc", TargetType.PHONE),
+        ("x y", TargetType.EMAIL),
+        ("999.999.999.999", TargetType.IPV4),
+        ("1.2.3.4", TargetType.IPV6),
+        ("has spaces", TargetType.USERNAME),
+        ("/no/such/photo.jpg", TargetType.IMAGE),
+    ],
+)
+def test_impossible_coercions_are_refused(value: str, target_type: TargetType) -> None:
+    """An override still has to be possible, or the target is unusable."""
+    with pytest.raises(TargetError):
+        coerce_target(value, target_type)
+
+
+def test_coercion_rejects_empty_input() -> None:
+    with pytest.raises(TargetError):
+        coerce_target("   ", TargetType.PERSON)
+
+
+def test_a_hint_rides_along_with_the_target() -> None:
+    assert parse_target("Ada Lovelace", hint="people").hint == "people"
+    assert coerce_target("Beau", TargetType.PERSON, hint="location").hint == "location"
+
+
+def test_targets_carry_no_hint_by_default() -> None:
+    assert parse_target("example.com").hint == ""

@@ -53,6 +53,10 @@ class Settings:
     vision_model: str = ""
     api_keys: dict[str, str] = field(default_factory=dict)
     disabled_modules: list[str] = field(default_factory=list)
+    #: Names of keys that came from the environment rather than the config file.
+    #: Never persisted: writing a secret to disk because it happened to be
+    #: exported would be a surprising thing for a save to do.
+    env_keys: set[str] = field(default_factory=set, repr=False, compare=False)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
@@ -69,7 +73,7 @@ class Settings:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             data = {}
 
-        known = set(cls.__slots__)
+        known = set(cls.__slots__) - {"env_keys"}
         settings = cls(**{k: v for k, v in data.items() if k in known})
         settings._apply_env()
         return settings
@@ -96,7 +100,9 @@ class Settings:
         prefix = "WOSINT_KEY_"
         for key, value in os.environ.items():
             if key.startswith(prefix) and value:
-                self.api_keys[key[len(prefix) :].lower()] = value
+                name = key[len(prefix) :].lower()
+                self.api_keys[name] = value
+                self.env_keys.add(name)
 
         disabled = os.environ.get("WOSINT_DISABLED_MODULES")
         if disabled:
@@ -106,8 +112,46 @@ class Settings:
         return self.api_keys.get(module) or None
 
     def save(self, path: Path | None = None) -> Path:
-        """Write settings to disk, creating the config directory if needed."""
+        """Write settings to disk, creating the config directory if needed.
+
+        Keys that arrived from the environment are left out: they belong to the
+        shell that exported them, and copying them into a file on disk would
+        turn a transient secret into a permanent one behind the user's back.
+
+        The file is written owner-only, because it holds API keys.
+        """
         path = path or config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+
+        data = asdict(self)
+        data.pop("env_keys", None)
+        data["api_keys"] = {
+            name: value for name, value in self.api_keys.items() if name not in self.env_keys
+        }
+
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            # Not every filesystem supports it; the settings are still written.
+            pass
         return path
+
+    def is_from_environment(self, module: str) -> bool:
+        """Whether this module's key came from the environment."""
+        return module in self.env_keys
+
+    def set_api_key(self, module: str, key: str) -> None:
+        """Store or clear a key for ``module``.
+
+        Refuses to touch a key the environment supplied: the file would be
+        ignored on the next load anyway, so silently accepting the edit would
+        be a lie.
+        """
+        if module in self.env_keys:
+            raise ValueError(f"{module}'s key comes from the environment and cannot be edited here")
+        key = key.strip()
+        if key:
+            self.api_keys[module] = key
+        else:
+            self.api_keys.pop(module, None)

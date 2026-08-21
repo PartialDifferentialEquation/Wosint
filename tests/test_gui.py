@@ -7,6 +7,7 @@ with hand-built results so nothing here touches the network.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import QApplication
 
 from wosint.core.models import Finding, ModuleResult, ModuleStatus, Severity
 from wosint.core.settings import Settings
-from wosint.core.targets import parse_target
+from wosint.core.targets import TargetType, parse_target
 from wosint.gui.models import FindingFilterProxy, FindingTableModel, ModuleTableModel
 from wosint.gui.widgets.module_panel import ModulePanel
 from wosint.gui.widgets.results_panel import ResultsPanel
@@ -48,14 +49,15 @@ def test_target_bar_classifies_as_you_type(qapp) -> None:
     bar = TargetBar()
 
     bar.input.setText("example.com")
-    assert bar.badge.text() == "Domain"
+    assert bar.target.type is TargetType.DOMAIN
+    assert "Read as domain" in bar.status.text()
     assert bar.scan_button.isEnabled()
 
     bar.input.setText("bob@example.com")
-    assert bar.badge.text() == "Email address"
+    assert bar.target.type is TargetType.EMAIL
 
     bar.input.setText("1.2.3.4")
-    assert bar.badge.text() == "IPv4 address"
+    assert bar.target.type is TargetType.IPV4
 
 
 def test_target_bar_disables_scanning_for_invalid_input(qapp) -> None:
@@ -63,7 +65,7 @@ def test_target_bar_disables_scanning_for_invalid_input(qapp) -> None:
     bar.input.setText("not a target!")
 
     assert bar.target is None
-    assert bar.badge.text() == "unrecognised"
+    assert "Could not work out" in bar.status.text()
     assert not bar.scan_button.isEnabled()
 
 
@@ -351,10 +353,10 @@ def test_target_bar_classifies_people_and_phone_numbers(qapp) -> None:
     bar = TargetBar()
 
     bar.input.setText("Ada Lovelace")
-    assert bar.badge.text() == "Person"
+    assert bar.target.type is TargetType.PERSON
 
     bar.input.setText("+1 415 555 0100")
-    assert bar.badge.text() == "Phone number"
+    assert bar.target.type is TargetType.PHONE
     assert bar.target.value == "+14155550100"
 
 
@@ -577,3 +579,210 @@ def test_profile_panel_reset_clears_everything(qapp) -> None:
 
     assert panel.tree.topLevelItemCount() == 0
     assert panel.investigation.entities == {}
+
+
+# -- explicit target type in the bar -----------------------------------------
+
+
+def test_target_bar_defaults_to_detecting_the_type(qapp) -> None:
+    bar = TargetBar()
+    bar.input.setText("Beau")
+
+    assert bar.chosen_type is None
+    assert bar.target.type is TargetType.USERNAME
+    assert "Read as username" in bar.status.text()
+
+
+def test_target_bar_honours_a_forced_type(qapp) -> None:
+    """A one-word name would otherwise be taken for a handle."""
+    bar = TargetBar()
+    bar.input.setText("Beau")
+    bar.select_type(TargetType.PERSON)
+
+    assert bar.target.type is TargetType.PERSON
+    assert bar.target.value == "Beau"
+    assert "Treating as person" in bar.status.text()
+
+
+def test_target_bar_reclassifies_when_the_type_changes(qapp) -> None:
+    bar = TargetBar()
+    bar.input.setText("5551234")
+    assert bar.target.type is TargetType.PHONE
+
+    bar.select_type(TargetType.USERNAME)
+    assert bar.target.type is TargetType.USERNAME
+
+    bar.select_type(None)
+    assert bar.target.type is TargetType.PHONE
+
+
+def test_target_bar_explains_an_impossible_override(qapp) -> None:
+    bar = TargetBar()
+    bar.input.setText("not a domain!!")
+    bar.select_type(TargetType.DOMAIN)
+
+    assert bar.target is None
+    assert "cannot be read as a domain" in bar.status.text()
+    assert not bar.scan_button.isEnabled()
+
+
+def test_target_bar_offers_person_as_a_choice(qapp) -> None:
+    bar = TargetBar()
+    offered = {bar.type_selector.itemData(i) for i in range(bar.type_selector.count())}
+
+    assert "person" in offered
+    assert "image" in offered
+    assert "auto" in offered
+
+
+# -- photo targets -----------------------------------------------------------
+
+
+def test_the_photo_row_appears_only_for_an_image(qapp, tmp_path) -> None:
+    from PIL import Image as PilImage
+
+    path = tmp_path / "photo.jpg"
+    PilImage.new("RGB", (8, 8)).save(path)
+
+    bar = TargetBar()
+    bar.show()
+
+    bar.input.setText("example.com")
+    assert not bar.photo_row.isVisible()
+
+    bar.input.setText(str(path))
+    assert bar.photo_row.isVisible()
+    assert bar.target.type is TargetType.IMAGE
+
+
+def test_the_photo_subject_rides_along_on_the_target(qapp, tmp_path) -> None:
+    from PIL import Image as PilImage
+
+    path = tmp_path / "photo.jpg"
+    PilImage.new("RGB", (8, 8)).save(path)
+
+    bar = TargetBar()
+    bar.input.setText(str(path))
+    assert bar.target.hint == "general"
+
+    index = bar.subject_selector.findData("location")
+    bar.subject_selector.setCurrentIndex(index)
+    assert bar.target.hint == "location"
+
+    index = bar.subject_selector.findData("people")
+    bar.subject_selector.setCurrentIndex(index)
+    assert bar.target.hint == "people"
+
+
+def test_the_photo_subject_offers_location_and_people(qapp) -> None:
+    bar = TargetBar()
+    offered = {bar.subject_selector.itemData(i) for i in range(bar.subject_selector.count())}
+    assert offered == {"general", "location", "people"}
+
+
+def test_a_photo_shows_its_filename_rather_than_its_path(qapp, tmp_path) -> None:
+    from PIL import Image as PilImage
+
+    path = tmp_path / "holiday.jpg"
+    PilImage.new("RGB", (8, 8)).save(path)
+
+    bar = TargetBar()
+    bar.input.setText(str(path))
+
+    assert bar.status.text().endswith("holiday.jpg")
+
+
+# -- settings dialog ---------------------------------------------------------
+
+
+def test_the_settings_dialog_offers_a_field_per_keyed_module(qapp) -> None:
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings())
+
+    assert {"vision", "opensanctions", "opencorporates", "hibp"} <= set(dialog._key_fields)
+
+
+def test_api_keys_are_masked(qapp) -> None:
+    from PySide6.QtWidgets import QLineEdit
+
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings())
+
+    assert dialog._key_fields["vision"].echoMode() == QLineEdit.EchoMode.Password
+
+
+def test_a_key_from_the_environment_is_shown_but_locked(qapp, monkeypatch) -> None:
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    monkeypatch.setenv("WOSINT_KEY_OPENSANCTIONS", "from-env")
+    settings = Settings.load(Path("/nonexistent/wosint.json"))
+    dialog = SettingsDialog(settings)
+
+    assert not dialog._key_fields["opensanctions"].isEnabled()
+    assert dialog._key_fields["vision"].isEnabled()
+
+
+def test_the_dialog_writes_its_edits_back(qapp, monkeypatch) -> None:
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    monkeypatch.delenv("WOSINT_KEY_VISION", raising=False)
+    settings = Settings()
+    dialog = SettingsDialog(settings)
+
+    dialog._key_fields["vision"].setText("a-key")
+    dialog.module_timeout.setValue(33.0)
+    dialog.max_concurrency.setValue(2)
+    dialog.phone_region.setText("gb")
+    dialog.contact_email.setText("me@example.com")
+    dialog.vision_model.setText("gemini-3.1-flash-preview")
+    dialog._module_boxes["wayback"].setChecked(False)
+    dialog.apply_to(settings)
+
+    assert settings.api_key("vision") == "a-key"
+    assert settings.module_timeout == 33.0
+    assert settings.max_concurrency == 2
+    assert settings.phone_region == "GB"  # normalised for libphonenumber
+    assert settings.contact_email == "me@example.com"
+    assert settings.vision_model == "gemini-3.1-flash-preview"
+    assert settings.disabled_modules == ["wayback"]
+
+
+def test_the_dialog_leaves_an_environment_key_alone(qapp, monkeypatch) -> None:
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    monkeypatch.setenv("WOSINT_KEY_HIBP", "from-env")
+    settings = Settings.load(Path("/nonexistent/wosint.json"))
+    dialog = SettingsDialog(settings)
+    dialog.apply_to(settings)
+
+    assert settings.api_key("hibp") == "from-env"
+
+
+def test_the_dialog_lists_every_module_for_disabling(qapp) -> None:
+    from wosint.core.registry import all_modules
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings())
+
+    assert set(dialog._module_boxes) == {m.name for m in all_modules()}
+
+
+def test_disabled_modules_start_unticked(qapp) -> None:
+    from wosint.gui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings(disabled_modules=["dns"]))
+
+    assert not dialog._module_boxes["dns"].isChecked()
+    assert dialog._module_boxes["rdap"].isChecked()
+
+
+def test_the_main_window_has_a_settings_menu(qapp) -> None:
+    from wosint.gui.main_window import MainWindow
+
+    window = MainWindow(Settings())
+    menus = {action.text() for action in window.menuBar().actions()}
+
+    assert "&Settings" in menus
+    window.close()

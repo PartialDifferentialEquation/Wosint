@@ -84,6 +84,10 @@ _MAX_PHONE_DIGITS = 15
 # apostrophes and accents that real names contain.
 _NAME_WORD = r"[^\W\d_][\w'\u2019-]*"
 _PERSON_RE = re.compile(rf"^{_NAME_WORD}(?:\s+{_NAME_WORD}){{1,4}}$", re.UNICODE)
+# When the analyst says "this is a name", a single word is allowed: auto-detection
+# reads "Beau" as a username because that is the safer guess, but being told
+# otherwise settles it.
+_PERSON_COERCE_RE = re.compile(rf"^{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,5}}$", re.UNICODE)
 
 
 class TargetError(ValueError):
@@ -98,11 +102,15 @@ class Target:
         value: The canonical form of the target (lower-cased, scheme stripped).
         type: What kind of artefact ``value`` is.
         raw: Exactly what the user typed, kept for display and reporting.
+        hint: An optional qualifier for this scan, such as what a photograph is
+            of. Modules that understand a hint use it to narrow what they look
+            for; every other module ignores it.
     """
 
     value: str
     type: TargetType
     raw: str
+    hint: str = ""
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.value
@@ -211,37 +219,105 @@ def detect_target_type(value: str) -> TargetType:
     raise TargetError(f"Could not work out what kind of target {candidate!r} is.")
 
 
-def parse_target(value: str) -> Target:
-    """Turn raw user input into a :class:`Target`.
+def parse_target(value: str, *, hint: str = "") -> Target:
+    """Turn raw user input into a :class:`Target`, working out its type.
+
+    Args:
+        value: What the analyst typed.
+        hint: Optional per-scan qualifier passed through to the target.
 
     Raises:
         TargetError: If the input cannot be classified.
     """
     raw = value.strip()
     target_type = detect_target_type(raw)
+    return Target(value=_normalise(raw, target_type), type=target_type, raw=raw, hint=hint)
 
+
+def coerce_target(value: str, target_type: TargetType, *, hint: str = "") -> Target:
+    """Read ``value`` as ``target_type``, overriding what detection would guess.
+
+    Auto-detection has to pick the safest reading of an ambiguous string, which
+    is not always the right one: a one-word name reads as a username, and a bare
+    run of digits reads as a phone number. This is how an analyst says which it
+    actually is.
+
+    The override still has to be possible -- forcing ``"not a domain!!"`` to be a
+    domain is refused rather than producing a target no module can use.
+
+    Raises:
+        TargetError: If ``value`` cannot be read as ``target_type``.
+    """
+    raw = value.strip()
+    if not raw:
+        raise TargetError("Enter a target to scan.")
+
+    validate = _COERCION_CHECKS.get(target_type)
+    if validate is not None and not validate(raw):
+        label = target_type.label.lower()
+        article = "an" if label[0] in "aeiou" else "a"
+        raise TargetError(f"{raw!r} cannot be read as {article} {label}.")
+
+    return Target(value=_normalise(raw, target_type), type=target_type, raw=raw, hint=hint)
+
+
+def _normalise(raw: str, target_type: TargetType) -> str:
+    """The canonical form of ``raw`` when read as ``target_type``."""
     if target_type is TargetType.URL:
-        parts = urlsplit(raw)
-        normalised = parts._replace(
+        # A bare hostname coerced to a URL needs a scheme to be fetchable.
+        candidate = raw if "://" in raw else f"https://{raw}"
+        parts = urlsplit(candidate)
+        return parts._replace(
             scheme=parts.scheme.lower(),
             netloc=parts.netloc.lower(),
             fragment="",
         ).geturl()
-    elif target_type in IP_TYPES:
-        normalised = str(ipaddress.ip_address(raw.strip("[]")))
-    elif target_type is TargetType.PHONE:
+    if target_type in IP_TYPES:
+        return str(ipaddress.ip_address(raw.strip("[]")))
+    if target_type is TargetType.PHONE:
         # Store the dialable form. The leading "+" is kept only when the input
         # actually carried a country code, so a national number is not silently
         # promoted to an international one.
         digits = phone_digits(raw)
-        normalised = f"+{digits}" if raw.lstrip().startswith(("+", "00")) else digits
-    elif target_type is TargetType.IMAGE:
-        normalised = str(Path(raw).expanduser().resolve())
-    elif target_type is TargetType.PERSON:
+        return f"+{digits}" if raw.lstrip().startswith(("+", "00")) else digits
+    if target_type is TargetType.IMAGE:
+        return str(Path(raw).expanduser().resolve())
+    if target_type is TargetType.PERSON:
         # Names keep their capitalisation; collapsing runs of whitespace is the
         # only tidying that is safe to do.
-        normalised = " ".join(raw.split())
-    else:
-        normalised = raw.lower().rstrip(".")
+        return " ".join(raw.split())
+    return raw.lower().rstrip(".")
 
-    return Target(value=normalised, type=target_type, raw=raw)
+
+def _is_ip_version(value: str, version: int) -> bool:
+    try:
+        return ipaddress.ip_address(value.strip("[]")).version == version
+    except ValueError:
+        return False
+
+
+def _is_url(value: str) -> bool:
+    """Whether ``value`` is a URL, or a hostname one can be built from."""
+    if "://" not in value:
+        return bool(_DOMAIN_RE.match(value))
+    parts = urlsplit(value)
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def _is_image(value: str) -> bool:
+    return _image_suffix(value) and Path(value).expanduser().is_file()
+
+
+#: What each type will accept when it is chosen explicitly. Anything absent
+#: here accepts whatever it is given.
+_COERCION_CHECKS = {
+    TargetType.DOMAIN: lambda v: bool(_DOMAIN_RE.match(v)),
+    TargetType.IPV4: lambda v: _is_ip_version(v, 4),
+    TargetType.IPV6: lambda v: _is_ip_version(v, 6),
+    TargetType.EMAIL: lambda v: bool(_EMAIL_RE.match(v)),
+    TargetType.URL: _is_url,
+    TargetType.USERNAME: lambda v: bool(_USERNAME_RE.match(v)),
+    TargetType.PHONE: _looks_like_a_phone_number,
+    TargetType.PERSON: lambda v: bool(_PERSON_COERCE_RE.match(v)),
+    TargetType.IMAGE: _is_image,
+}
