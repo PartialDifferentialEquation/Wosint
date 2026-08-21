@@ -101,6 +101,7 @@ wosint scan bob@example.com                # email: provider, profiles, accounts
 wosint scan "+1 415 555 0100" -m phone     # offline number analysis
 wosint scan "Ada Lovelace"                 # person: records, filings, dockets
 wosint scan ~/photos/IMG_4021.jpg -m exif  # offline image metadata
+wosint profile case.json                   # read back a profile saved earlier
 wosint modules                             # catalogue and availability
 ```
 
@@ -202,7 +203,7 @@ notable because it is worth a look.
 The **Findings** tab is filterable by text and by severity. **Modules** shows
 what ran, how long it took and why anything failed. **Raw output** keeps each
 tool's untouched output, so nothing is hidden behind the parser. Double-click
-any cell to copy it. `Ctrl+S` exports the whole scan as JSON; the Export menu
+any cell to copy it. `Ctrl+S` exports the whole scan as JSON; the File menu
 also writes the visible findings to CSV.
 
 ### Building a picture
@@ -228,6 +229,24 @@ bob@example.com  →  Gravatar profile  →  linked GitHub account
 ```
 
 happens in four clicks, with each step recorded.
+
+#### Putting a case down and picking it up
+
+**File → Export profile as JSON…** writes the whole picture — every entity, the
+sources behind each one, the connections between them and what has been scanned
+so far. **Open saved profile…** (`Ctrl+Shift+O`) reads one back, and if there is
+already a profile on screen it asks whether to merge the file into it or replace
+it, so reopening either continues one subject or starts another. Following a
+lead from a reopened profile works exactly as it did before it was saved.
+
+What comes back in is only what was *stated*. Confidence, whether a claim rests
+on a guess, and which leads are worth following are all recomputed from the
+sources on the way in, because a profile is a file on disk that anything can
+edit in between — an edited file cannot talk itself into a confidence, or into a
+pivot, that its provenance does not support.
+
+`wosint profile case.json` prints the same thing in a terminal, and
+`--json` re-emits it for scripting.
 
 #### Inferences are marked, and never chained
 

@@ -44,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, metavar="SECONDS", help="per-module timeout override"
     )
 
+    profile = sub.add_parser("profile", help="print a profile exported earlier")
+    profile.add_argument("path", help="a JSON file written by File → Export profile")
+    profile.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
     sub.add_parser("modules", help="list the module catalogue and its availability")
     return parser
 
@@ -62,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         from .cli import list_modules
 
         return list_modules(sys.stdout)
+
+    if args.command == "profile":
+        from .cli import show_profile
+
+        return show_profile(args.path, as_json=args.json, stream=sys.stdout)
 
     if args.command == "scan":
         from .cli import run_scan

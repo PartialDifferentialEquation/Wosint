@@ -11,8 +11,11 @@ import asyncio
 import json
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TextIO
 
+from .core.correlate import Investigation
+from .core.entities import InvestigationError
 from .core.models import ModuleStatus, Scan, Severity
 from .core.registry import all_modules
 from .core.runner import scan_target
@@ -74,6 +77,68 @@ def run_scan(
 
     ran = any(r.status.is_terminal and r.succeeded for r in scan.results.values())
     return 0 if ran else 1
+
+
+def show_profile(path: str, *, as_json: bool, stream: TextIO) -> int:
+    """Print a profile exported from the GUI or from a previous run.
+
+    Reading a saved investigation back without Qt is also the check that the
+    correlator stayed where it belongs: if this needed a widget, the picture
+    would live in the interface rather than in the engine.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"error: {path}: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        investigation = Investigation.from_json(text)
+    except InvestigationError as exc:
+        print(f"error: {path}: {exc}", file=sys.stderr)
+        return 1
+
+    if as_json:
+        json.dump(investigation.as_dict(), stream, indent=2)
+        stream.write("\n")
+        return 0
+
+    _print_profile(investigation, stream)
+    return 0
+
+
+def _print_profile(investigation: Investigation, stream: TextIO) -> None:
+    scanned = investigation.scanned
+    print(
+        f"\nProfile assembled from {len(scanned)} scan{'s' if len(scanned) != 1 else ''}"
+        + (f": {', '.join(scanned)}" if scanned else ""),
+        file=stream,
+    )
+    print("=" * 70, file=stream)
+
+    for entity_type, entities in investigation.summary().items():
+        print(f"\n[{entity_type.label.lower()}]", file=stream)
+        for entity in entities:
+            # `corroboration` already says "inferred, unconfirmed" for a guess,
+            # which is the one thing that must not be missed on a printed line.
+            print(
+                f"  {entity.confidence:>4.0%}  {entity.display:<40} {entity.corroboration}",
+                file=stream,
+            )
+
+    pivots = [p for p in investigation.pivots() if not p.scanned]
+    if pivots:
+        print("\n[follow next]", file=stream)
+        for pivot in pivots:
+            print(f"  {pivot.value:<40} {pivot.reason}", file=stream)
+
+    total = len(investigation.entities)
+    print(
+        f"\n{total} entit{'ies' if total != 1 else 'y'} · "
+        f"{len(investigation.relations)} connections · "
+        f"{len(pivots)} lead{'s' if len(pivots) != 1 else ''} not yet scanned",
+        file=stream,
+    )
 
 
 def _make_progress(stream: TextIO):

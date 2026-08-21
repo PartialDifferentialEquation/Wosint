@@ -145,6 +145,20 @@ class ProfilePanel(QWidget):
         self._investigation.add_scan(scan)
         self.refresh()
 
+    def load_investigation(self, investigation: Investigation, *, merge: bool = False) -> None:
+        """Show a reopened investigation.
+
+        Merging keeps what is already on screen and folds the file into it,
+        which is what continuing yesterday's work looks like; replacing is for
+        opening a different subject. The panel never guesses which was meant --
+        the window asks.
+        """
+        if merge:
+            self._investigation.merge(investigation)
+        else:
+            self._investigation = investigation
+        self.refresh()
+
     def reset(self) -> None:
         """Forget everything and start a new subject."""
         self._investigation = Investigation()

@@ -12,7 +12,9 @@ every relation keeps its reason.
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +22,7 @@ from .entities import (
     PIVOTABLE,
     Entity,
     EntityType,
+    InvestigationError,
     Relation,
     RelationKind,
     Source,
@@ -28,6 +31,11 @@ from .entities import (
 )
 from .models import Finding, ModuleResult, Scan
 from .targets import Target, TargetType, parse_target
+
+#: Version of the exported profile format. Bumped when a change would stop an
+#: older build from reading a file correctly; a file with no version is read as
+#: version 1, which is what earlier builds wrote.
+FORMAT_VERSION = 1
 
 #: Finding labels that name a person, mapped to the entity type they produce.
 LABEL_TYPES: dict[str, EntityType] = {
@@ -241,13 +249,7 @@ class Investigation:
 
     def relate(self, source: Entity, target: Entity, kind: RelationKind, reason: str = "") -> None:
         """Record a connection, ignoring duplicates."""
-        key = (source.key, target.key, kind)
-        if key in self._relation_keys:
-            return
-        self._relation_keys.add(key)
-        self.relations.append(
-            Relation(source=source.key, target=target.key, kind=kind, reason=reason)
-        )
+        self._add_relation(Relation(source=source.key, target=target.key, kind=kind, reason=reason))
 
     # -- reading the picture ------------------------------------------------
 
@@ -340,13 +342,95 @@ class Investigation:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "version": FORMAT_VERSION,
             "scanned": list(self.scanned),
             "entities": [e.as_dict() for e in self.entities.values()],
             "relations": [r.as_dict() for r in self.relations],
             "pivots": [p.as_dict() for p in self.pivots()],
         }
 
+    # -- reopening ---------------------------------------------------------
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Investigation:
+        """Rebuild an investigation from what :meth:`as_dict` wrote.
+
+        Only what was *stated* is read back: entities, their sources, the edges
+        between them and which targets have been scanned. Everything derived --
+        confidence, whether an entity rests on a guess, and the pivots -- is
+        recomputed from the sources here, so a file cannot assert a confidence
+        or offer a lead its provenance does not support. That matters because a
+        profile is a file on disk that anything can edit before it comes back.
+
+        Raises:
+            InvestigationError: If the file is not a profile, or a claim in it
+                is unusable.
+        """
+        if not isinstance(data, Mapping):
+            raise InvestigationError("a saved investigation must be a JSON object")
+
+        version = data.get("version", FORMAT_VERSION)
+        if not isinstance(version, int) or version > FORMAT_VERSION:
+            raise InvestigationError(
+                f"this profile is version {version}; this build reads up to {FORMAT_VERSION}"
+            )
+
+        entities = data.get("entities")
+        if entities is None or not isinstance(entities, list):
+            raise InvestigationError("a saved investigation needs an 'entities' list")
+
+        investigation = cls()
+        for raw in entities:
+            investigation.add_entity(Entity.from_dict(raw))
+        for raw in _list(data.get("relations"), "relations"):
+            investigation._add_relation(Relation.from_dict(raw))
+        for value in _list(data.get("scanned"), "scanned"):
+            if not isinstance(value, str):
+                raise InvestigationError("'scanned' must list the targets as strings")
+            value = value.strip()
+            if value and value not in investigation.scanned:
+                investigation.scanned.append(value)
+        return investigation
+
+    @classmethod
+    def from_json(cls, text: str) -> Investigation:
+        """Rebuild an investigation from exported JSON text."""
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise InvestigationError(f"not valid JSON: {exc}") from exc
+        return cls.from_dict(data)
+
+    def merge(self, other: Investigation) -> None:
+        """Fold another investigation into this one.
+
+        Reopening a saved profile and carrying on is the same operation as
+        adding a scan: entities with the same identity become one with both
+        sets of sources, so a reopened profile keeps growing rather than
+        starting again.
+        """
+        for entity in other.entities.values():
+            self.add_entity(entity)
+        for relation in other.relations:
+            self._add_relation(relation)
+        for value in other.scanned:
+            if value not in self.scanned:
+                self.scanned.append(value)
+
     # -- internals ---------------------------------------------------------
+
+    def _add_relation(self, relation: Relation) -> None:
+        """Store an edge, ignoring one we already have.
+
+        An edge whose ends are not (yet) in the picture is kept rather than
+        dropped: a later scan may bring the missing entity in, and
+        :meth:`related_to` only ever walks edges whose ends it can resolve.
+        """
+        key = (relation.source, relation.target, relation.kind)
+        if key in self._relation_keys:
+            return
+        self._relation_keys.add(key)
+        self.relations.append(relation)
 
     def _subject_entity(self, target: Target) -> Entity | None:
         """The entity representing what was scanned."""
@@ -389,6 +473,15 @@ class Investigation:
             EntityType.PERSON_NAME: RelationKind.SAME_AS,
         }.get(entity.type, RelationKind.MENTIONED_WITH)
         self.relate(subject, entity, kind, reason=f"reported by {result.module}")
+
+
+def _list(value: Any, name: str) -> list:
+    """A list from a saved profile, or a clear error saying which key is wrong."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise InvestigationError(f"{name!r} must be a list")
+    return value
 
 
 def _types_agree(parsed: TargetType, expected: TargetType) -> bool:

@@ -119,3 +119,103 @@ def test_main_scan_applies_timeout_override(isolated_registry, monkeypatch, caps
     monkeypatch.setattr("wosint.cli.run_scan", fake_run_scan)
     assert main(["scan", "example.com", "--timeout", "7"]) == 0
     assert captured["timeout"] == 7.0
+
+
+# -- reopening a profile -----------------------------------------------------
+
+
+def write_profile(tmp_path, **overrides):
+    """A small exported profile on disk, for the reopening tests."""
+    from wosint.core.correlate import Investigation
+    from wosint.core.models import Finding, ModuleResult, ModuleStatus, Scan
+    from wosint.core.targets import parse_target
+
+    scan = Scan(target=parse_target("bob@example.com"))
+    scan.results["gravatar"] = ModuleResult(
+        module="gravatar",
+        title="Gravatar",
+        kind="api",
+        status=ModuleStatus.OK,
+        findings=[
+            Finding("profile", "Full name", "Jane Doe"),
+            Finding("account", "Github", "https://github.com/janedoe"),
+            Finding("profile", "Employer", "Acme Corp", "guessed", inferred=True),
+        ],
+    )
+    scan.finished_at = scan.started_at
+    investigation = Investigation()
+    investigation.add_scan(scan)
+
+    payload = investigation.as_dict()
+    payload.update(overrides)
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_a_saved_profile_prints_without_qt(tmp_path) -> None:
+    """The engine's picture has to be readable headlessly, or it lives in the GUI."""
+    from wosint.cli import show_profile
+
+    stream = io.StringIO()
+    assert show_profile(str(write_profile(tmp_path)), as_json=False, stream=stream) == 0
+
+    output = stream.getvalue()
+    assert "bob@example.com" in output
+    assert "Jane Doe" in output
+    assert "[follow next]" in output
+    assert "janedoe" in output
+
+
+def test_a_printed_profile_marks_what_rests_on_a_guess(tmp_path) -> None:
+    from wosint.cli import show_profile
+
+    stream = io.StringIO()
+    show_profile(str(write_profile(tmp_path)), as_json=False, stream=stream)
+
+    line = next(line for line in stream.getvalue().splitlines() if "Acme Corp" in line)
+    assert "inferred, unconfirmed" in line
+    assert "25%" in line
+
+
+def test_a_saved_profile_reprints_as_json(tmp_path) -> None:
+    from wosint.cli import show_profile
+
+    path = write_profile(tmp_path)
+    stream = io.StringIO()
+    assert show_profile(str(path), as_json=True, stream=stream) == 0
+
+    assert json.loads(stream.getvalue()) == json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a_file_that_is_not_a_profile_fails_with_a_reason(tmp_path, capsys) -> None:
+    from wosint.cli import show_profile
+
+    path = tmp_path / "notes.json"
+    path.write_text('{"notes": "nothing to see"}', encoding="utf-8")
+
+    assert show_profile(str(path), as_json=False, stream=io.StringIO()) == 1
+    assert "entities" in capsys.readouterr().err
+
+
+def test_a_missing_profile_fails_rather_than_raising(tmp_path, capsys) -> None:
+    from wosint.cli import show_profile
+
+    assert show_profile(str(tmp_path / "gone.json"), as_json=False, stream=io.StringIO()) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_main_dispatches_to_the_profile_command(tmp_path, capsys) -> None:
+    assert main(["profile", str(write_profile(tmp_path))]) == 0
+    assert "Jane Doe" in capsys.readouterr().out
+
+
+def test_a_binary_file_fails_rather_than_raising(tmp_path, capsys) -> None:
+    """Picking a photo by mistake is a bad file, not a traceback."""
+    from wosint.cli import show_profile
+
+    path = tmp_path / "photo.json"
+    path.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00")
+
+    assert show_profile(str(path), as_json=False, stream=io.StringIO()) == 1
+    assert "error:" in capsys.readouterr().err

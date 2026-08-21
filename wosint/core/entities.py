@@ -14,11 +14,20 @@ written the same way first.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from .targets import TargetType, phone_digits
+
+
+class InvestigationError(ValueError):
+    """A saved investigation could not be read back.
+
+    Raised rather than silently repairing a file: a profile that quietly loses
+    the provenance behind a claim is worse than one that refuses to open.
+    """
 
 
 class EntityType(str, Enum):
@@ -104,6 +113,28 @@ class Source:
 
     def __str__(self) -> str:  # pragma: no cover - display helper
         return f"{self.label} ({self.module})"
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Source:
+        """Read a source back from an exported profile.
+
+        The module is required. A claim that cannot name who made it is not a
+        source, and importing one would put an unattributable line into a
+        profile that is supposed to be auditable end to end.
+        """
+        if not isinstance(data, Mapping):
+            raise InvestigationError("a source must be an object")
+        module = str(data.get("module") or "").strip()
+        if not module:
+            raise InvestigationError("a source is missing the module that made the claim")
+        return cls(
+            module=module,
+            label=str(data.get("label") or "").strip(),
+            detail=str(data.get("detail") or ""),
+            scan_id=str(data.get("scan_id") or ""),
+            target=str(data.get("target") or ""),
+            inferred=bool(data.get("inferred", False)),
+        )
 
 
 @dataclass(slots=True)
@@ -207,12 +238,59 @@ class Entity:
                     "module": s.module,
                     "label": s.label,
                     "detail": s.detail,
+                    "scan_id": s.scan_id,
                     "target": s.target,
                     "inferred": s.inferred,
                 }
                 for s in self.sources
             ],
         }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Entity:
+        """Rebuild an entity from an exported profile.
+
+        Only the stated facts are read back. ``confidence``, ``inferred`` and
+        ``modules`` are written for whoever reads the file, but they are derived
+        from the sources, so recomputing them is what stops an edited file from
+        asserting a confidence its provenance does not support.
+
+        The value is re-normalised on the way in. Identity is the normalised
+        form, so a hand-written ``Bob@Example.COM`` has to become
+        ``bob@example.com`` here or it would sit beside the same address rather
+        than merging with it.
+        """
+        if not isinstance(data, Mapping):
+            raise InvestigationError("an entity must be an object")
+        try:
+            entity_type = EntityType(data.get("type"))
+        except ValueError:
+            raise InvestigationError(f"unknown entity type {data.get('type')!r}") from None
+
+        value = str(data.get("value") or "").strip()
+        if not value:
+            raise InvestigationError(f"an entity of type {entity_type.value} has no value")
+
+        raw_sources = data.get("sources") or []
+        if not isinstance(raw_sources, list):
+            raise InvestigationError(f"the sources of {value!r} must be a list")
+        sources = [Source.from_dict(raw) for raw in raw_sources]
+        if not sources:
+            raise InvestigationError(
+                f"{value!r} has no sources; nothing in a profile is unattributable"
+            )
+
+        attributes = data.get("attributes") or {}
+        if not isinstance(attributes, Mapping):
+            raise InvestigationError(f"the attributes of {value!r} must be an object")
+
+        return cls(
+            type=entity_type,
+            value=normalise(entity_type, value),
+            display=str(data.get("display") or value),
+            sources=sources,
+            attributes={str(k): str(v) for k, v in attributes.items()},
+        )
 
 
 class RelationKind(str, Enum):
@@ -255,6 +333,36 @@ class Relation:
             "kind": self.kind.value,
             "reason": self.reason,
         }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Relation:
+        """Rebuild an edge from an exported profile."""
+        if not isinstance(data, Mapping):
+            raise InvestigationError("a relation must be an object")
+        try:
+            kind = RelationKind(data.get("kind"))
+        except ValueError:
+            raise InvestigationError(f"unknown relation kind {data.get('kind')!r}") from None
+        return cls(
+            source=_endpoint(data.get("source"), "source"),
+            target=_endpoint(data.get("target"), "target"),
+            kind=kind,
+            reason=str(data.get("reason") or ""),
+        )
+
+
+def _endpoint(data: Any, side: str) -> tuple[EntityType, str]:
+    """One end of a relation, as the key its entity is stored under."""
+    if not isinstance(data, Mapping):
+        raise InvestigationError(f"the {side} of a relation must be an object")
+    try:
+        entity_type = EntityType(data.get("type"))
+    except ValueError:
+        raise InvestigationError(f"unknown entity type {data.get('type')!r}") from None
+    value = str(data.get("value") or "").strip()
+    if not value:
+        raise InvestigationError(f"the {side} of a relation has no value")
+    return (entity_type, normalise(entity_type, value))
 
 
 # -- normalisation -----------------------------------------------------------

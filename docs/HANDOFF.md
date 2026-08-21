@@ -36,16 +36,16 @@ a web app. That was a deliberate choice by the project owner.
 
 | | |
 |---|---|
-| Branch | `claude/osint-frontend-wrapper-3lpha3` — the **only** branch (see §12) |
-| Latest commit | `23943e7` |
-| Tests | **380 passing**, no network and no CLI tools required |
+| Branch | `claude/dev-continuation-47l61d`, off `claude/osint-frontend-wrapper-3lpha3` (see §12) |
+| Latest commit | `Reopen a saved investigation` |
+| Tests | **410 passing**, no network and no CLI tools required |
 | Lint | `ruff check` and `ruff format --check` both clean |
 | Size | ~7,800 lines of app code, ~4,100 lines of tests |
 | Modules | 29 |
 | Python | 3.10+ (CI runs 3.10, 3.11, 3.12) |
 | PR | None opened yet |
 
-**The eight commits, in order** — each is a coherent milestone and the messages
+**The nine commits, in order** — each is a coherent milestone and the messages
 are detailed:
 
 ```
@@ -57,6 +57,7 @@ c0e8949  Add image analysis: offline EXIF and Claude vision
 06bbe4c  Rewrite the vision module for the Gemini API
 febad6b  Add requirements.txt
 23943e7  Add explicit target types, photo intent, and an advanced settings panel
+         Reopen a saved investigation
 ```
 
 ### What is proven, and what is not
@@ -73,6 +74,12 @@ behaves as assumed.
 | | **`github`** — the build sandbox's proxy returns 403 on the API |
 | | Every `cli` module — none of the tools were installed |
 | | `hibp`, `opensanctions`, `opencorporates` — no keys |
+
+That right-hand column was re-checked from a second sandbox and none of it has
+moved: Wikimedia answers the shared egress IP with a rate-limit page, crt.sh and
+the Wayback CDX endpoint return 502 through the proxy, and the GitHub API still
+returns 403. Nothing about that says the modules are wrong — it says these four
+have to be verified from an ordinary machine, and nobody has been able to yet.
 
 **The single highest-value first task is to run `vision` against a real Gemini
 key.** It is the newest code, it is the only module whose SDK call has never
@@ -92,7 +99,7 @@ the actual binaries.
 ```bash
 git clone https://github.com/PartialDifferentialEquation/Wosint
 cd Wosint
-git checkout claude/osint-frontend-wrapper-3lpha3
+git checkout claude/dev-continuation-47l61d
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
@@ -112,6 +119,7 @@ wosint                                   # the desktop app
 wosint modules                           # catalogue + why anything is unavailable
 wosint scan example.com                  # headless, same engine
 wosint scan 1.2.3.4 --json               # machine-readable
+wosint profile case.json                 # read back a saved profile
 
 QT_QPA_PLATFORM=offscreen pytest         # the suite; offscreen is required
 ruff check wosint tests && ruff format --check wosint tests
@@ -329,9 +337,21 @@ bob@example.com → Gravatar → linked GitHub account
 `ProfilePanel` renders this; double-clicking a lead in "Follow next" scans it
 into the same profile.
 
-**Known gap:** you can *export* an investigation (Export → profile as JSON) but
-there is no import. Reopening a saved investigation would be a natural next
-feature, and `Investigation.as_dict()` already produces everything needed.
+An investigation round-trips through JSON: `as_dict()` writes it,
+`Investigation.from_dict()` / `from_json()` read it back, and `merge()` folds one
+into another so a reopened profile keeps growing. Only *stated* facts are read —
+sources, edges, what has been scanned. Confidence, `is_inferred` and the pivots
+are recomputed from the sources on the way in, deliberately: the file is on disk
+between sessions and an edited one must not be able to assert a confidence, or
+offer a lead, that its provenance does not support. Anything unusable is refused
+with `InvestigationError` rather than half-loaded, and an entity with no sources
+is refused outright — nothing in a profile is unattributable.
+
+The GUI reaches this through **File → Open saved profile…** (`Ctrl+Shift+O`),
+which asks whether to merge or replace when a profile is already open;
+`wosint profile <file>` prints one headlessly. `FORMAT_VERSION` in
+`correlate.py` guards the format: a file with no version is read as version 1,
+and a newer one is refused rather than misread.
 
 ---
 
@@ -471,21 +491,23 @@ Roughly in order of value:
 2. **Verify `wikidata`, `crtsh`, `wayback` and `github` from a normal IP.** All
    four were blocked by the build sandbox, not by bugs — but "should work" is
    not "works".
-3. **Import an investigation.** Export exists, import does not; `as_dict()`
-   already has everything.
-4. **A relationship view.** `Relation` edges are built and carry reasons, but
+3. **A relationship view.** `Relation` edges are built and carry reasons, but
    are only surfaced in tooltips. A graph would show the shape of a profile.
-5. **Response caching / rate limiting** for API modules. Several sources are
+4. **Response caching / rate limiting** for API modules. Several sources are
    rate limited and re-scanning repeats identical requests.
-6. **Package a real binary** (PyInstaller) so it installs like a desktop app.
-7. **More sources.** The module interface is the cheap part — each new one is
+5. **Package a real binary** (PyInstaller) so it installs like a desktop app.
+6. **More sources.** The module interface is the cheap part — each new one is
    one file plus one import line.
+7. **Auto-save the open investigation** now that it round-trips, so closing the
+   window does not lose an afternoon's work. The pieces are all there; what
+   needs deciding is where it lives and when it is deleted, which is a privacy
+   question as much as a storage one (see §11).
 
 Two smaller things worth knowing. The repository was created completely empty —
-there is **no `main` branch on the remote at all**, only
-`claude/osint-frontend-wrapper-3lpha3`, so whoever opens the first PR will need
-to create a default branch or merge this one into a new `main`. And no PR has
-been opened yet.
+there is still **no `main` branch on the remote at all**, only
+`claude/osint-frontend-wrapper-3lpha3` and `claude/dev-continuation-47l61d`
+(which contains it), so whoever opens the first PR will need to create a default
+branch or merge one of these into a new `main`. And no PR has been opened yet.
 
 ---
 

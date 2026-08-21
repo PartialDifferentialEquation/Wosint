@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wosint.core.correlate import Investigation, handle_from_url
-from wosint.core.entities import Entity, EntityType, RelationKind, Source, normalise
+from wosint.core.entities import (
+    Entity,
+    EntityType,
+    InvestigationError,
+    RelationKind,
+    Source,
+    normalise,
+)
 from wosint.core.models import Finding, ModuleResult, ModuleStatus, Scan, Severity
 from wosint.core.targets import TargetType, parse_target
 
@@ -466,3 +475,173 @@ def test_serialised_entities_carry_the_inferred_flag() -> None:
     name = next(e for e in investigation.as_dict()["entities"] if e["type"] == "person_name")
     assert name["inferred"] is True
     assert name["sources"][0]["inferred"] is True
+
+
+# -- reopening a saved investigation -----------------------------------------
+
+
+def saved_investigation() -> Investigation:
+    """A profile with a confirmed lead, a guess and a second scan folded in."""
+    investigation = Investigation()
+    investigation.add_scan(
+        scan_with(
+            "bob@example.com",
+            "gravatar",
+            [
+                Finding("profile", "Full name", "Jane Doe", "from the profile"),
+                Finding("account", "Github", "https://github.com/janedoe"),
+                Finding("profile", "Employer", "Acme Corp", "guessed", inferred=True),
+            ],
+        )
+    )
+    investigation.add_scan(
+        scan_with("janedoe", "github", [Finding("profile", "Location", "Berlin")])
+    )
+    return investigation
+
+
+def test_a_saved_investigation_reopens_unchanged() -> None:
+    """Export then import has to be lossless, or reopening quietly rewrites the case."""
+    original = saved_investigation()
+
+    reopened = Investigation.from_json(json.dumps(original.as_dict()))
+
+    assert reopened.as_dict() == original.as_dict()
+    assert reopened.scanned == original.scanned
+    assert len(reopened.relations) == len(original.relations)
+
+
+def test_reopening_keeps_the_provenance_behind_every_claim() -> None:
+    reopened = Investigation.from_dict(saved_investigation().as_dict())
+
+    name = reopened.of_type(EntityType.PERSON_NAME)[0]
+    assert [s.module for s in name.sources] == ["gravatar"]
+    assert name.sources[0].label == "Full name"
+    assert name.sources[0].detail == "from the profile"
+    assert name.sources[0].target == "bob@example.com"
+
+
+def test_reopening_keeps_a_guess_a_guess() -> None:
+    """The inferred flag is the safety mechanism; a file must not launder it."""
+    reopened = Investigation.from_dict(saved_investigation().as_dict())
+
+    employer = reopened.of_type(EntityType.ORGANISATION)[0]
+    assert employer.is_inferred
+    assert employer.confidence == 0.25
+    assert all(p.value != "Acme Corp" for p in reopened.pivots())
+
+
+def test_confidence_is_recomputed_rather_than_believed() -> None:
+    """A file can claim anything; what an entity rests on is what decides."""
+    payload = saved_investigation().as_dict()
+    for entity in payload["entities"]:
+        entity["confidence"] = 1.0
+        entity["inferred"] = False
+
+    reopened = Investigation.from_dict(payload)
+
+    employer = reopened.of_type(EntityType.ORGANISATION)[0]
+    assert employer.is_inferred
+    assert employer.confidence == 0.25
+
+
+def test_a_reopened_profile_still_knows_what_has_been_scanned() -> None:
+    reopened = Investigation.from_dict(saved_investigation().as_dict())
+
+    scanned = [p for p in reopened.pivots() if p.scanned]
+    assert {p.value for p in scanned} == {"bob@example.com", "janedoe"}
+
+
+def test_a_reopened_value_is_normalised_so_it_still_merges() -> None:
+    """A hand-edited address has to land on the entity it is the same as."""
+    payload = {
+        "entities": [
+            {
+                "type": "email",
+                "value": "Bob@Example.COM",
+                "display": "Bob@Example.COM",
+                "sources": [{"module": "gravatar", "label": "Email"}],
+            }
+        ]
+    }
+
+    reopened = Investigation.from_dict(payload)
+    reopened.add_scan(scan_with("bob@example.com", "hibp", [Finding("breach", "Breach", "Acme")]))
+
+    addresses = reopened.of_type(EntityType.EMAIL)
+    assert [e.value for e in addresses] == ["bob@example.com"]
+    assert addresses[0].modules == {"gravatar", "target"}
+
+
+def test_reopening_merges_into_the_picture_already_open() -> None:
+    """Continuing yesterday's work adds to it rather than replacing it."""
+    current = Investigation()
+    current.add_scan(
+        scan_with("bob@example.com", "hibp", [Finding("breach", "Breach", "Acme breach")])
+    )
+
+    current.merge(Investigation.from_dict(saved_investigation().as_dict()))
+
+    assert current.scanned == ["bob@example.com", "janedoe"]
+    assert current.of_type(EntityType.BREACH)
+    assert any(e.display == "Jane Doe" for e in current.of_type(EntityType.PERSON_NAME))
+    # The subject of both is one entity, not the same address twice.
+    assert [e.value for e in current.of_type(EntityType.EMAIL)] == ["bob@example.com"]
+
+
+def test_merging_the_same_profile_twice_does_not_duplicate_anything() -> None:
+    saved = saved_investigation().as_dict()
+    investigation = Investigation.from_dict(saved)
+    before = (len(investigation.entities), len(investigation.relations))
+
+    investigation.merge(Investigation.from_dict(saved))
+
+    assert (len(investigation.entities), len(investigation.relations)) == before
+
+
+def test_an_entity_without_sources_is_refused() -> None:
+    """Nothing in a profile is unattributable, including on the way back in."""
+    payload = {"entities": [{"type": "email", "value": "bob@example.com", "sources": []}]}
+
+    with pytest.raises(InvestigationError, match="no sources"):
+        Investigation.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("[]", "must be a JSON object"),
+        ('{"version": 2, "entities": []}', "version 2"),
+        ('{"scanned": []}', "'entities' list"),
+        ('{"entities": [{"type": "wombat", "value": "x", "sources": []}]}', "unknown entity type"),
+        ('{"entities": [{"type": "email", "value": "", "sources": []}]}', "no value"),
+        (
+            '{"entities": [{"type": "email", "value": "a@b.co", "sources": [{"label": "x"}]}]}',
+            "missing the module",
+        ),
+        (
+            '{"entities": [], "relations": [{"kind": "flies_with",'
+            ' "source": {"type": "email", "value": "a@b.co"},'
+            ' "target": {"type": "email", "value": "c@d.co"}}]}',
+            "unknown relation kind",
+        ),
+        ('{"entities": [], "relations": {}}', "'relations' must be a list"),
+        ('{"entities": [], "scanned": [null]}', "as strings"),
+    ],
+)
+def test_a_file_that_is_not_a_profile_is_refused(payload: str, message: str) -> None:
+    with pytest.raises(InvestigationError, match=message):
+        Investigation.from_json(payload)
+
+
+def test_text_that_is_not_json_is_refused() -> None:
+    with pytest.raises(InvestigationError, match="not valid JSON"):
+        Investigation.from_json("<html>404</html>")
+
+
+def test_a_profile_written_before_versioning_still_opens() -> None:
+    """Files exported by the first build carry no version field."""
+    payload = saved_investigation().as_dict()
+    del payload["version"]
+
+    assert Investigation.from_dict(payload).entities

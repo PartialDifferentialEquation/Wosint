@@ -786,3 +786,128 @@ def test_the_main_window_has_a_settings_menu(qapp) -> None:
 
     assert "&Settings" in menus
     window.close()
+
+
+# -- reopening a saved profile -----------------------------------------------
+
+
+def saved_profile_file(tmp_path, name: str = "profile.json") -> Path:
+    """A profile exported from one scan, on disk."""
+    import json as _json
+
+    from wosint.core.correlate import Investigation
+
+    investigation = Investigation()
+    investigation.add_scan(
+        profile_scan(
+            "bob@example.com",
+            "gravatar",
+            [
+                Finding("profile", "Full name", "Jane Doe"),
+                Finding("account", "Github", "https://github.com/janedoe"),
+                Finding("profile", "Employer", "Acme Corp", "guessed", inferred=True),
+            ],
+        )
+    )
+    path = tmp_path / name
+    path.write_text(_json.dumps(investigation.as_dict()), encoding="utf-8")
+    return path
+
+
+def test_profile_panel_shows_a_reopened_investigation(qapp, tmp_path) -> None:
+    from wosint.core.correlate import Investigation
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    text = saved_profile_file(tmp_path).read_text(encoding="utf-8")
+
+    panel.load_investigation(Investigation.from_json(text))
+
+    assert "bob@example.com" in panel.subheading.text()
+    groups = {
+        panel.tree.topLevelItem(i).text(0).split("  (")[0]
+        for i in range(panel.tree.topLevelItemCount())
+    }
+    assert {"Name", "Email address", "Username"} <= groups
+
+
+def test_profile_panel_merges_a_file_into_what_is_open(qapp, tmp_path) -> None:
+    from wosint.core.correlate import Investigation
+    from wosint.gui.widgets.profile_panel import ProfilePanel
+
+    panel = ProfilePanel()
+    panel.add_scan(profile_scan("janedoe", "github", [Finding("profile", "Location", "Berlin")]))
+    text = saved_profile_file(tmp_path).read_text(encoding="utf-8")
+
+    panel.load_investigation(Investigation.from_json(text), merge=True)
+
+    assert panel.investigation.scanned == ["janedoe", "bob@example.com"]
+    values = {e.display for e in panel.investigation.entities.values()}
+    assert {"Berlin", "Jane Doe"} <= values
+
+
+def test_the_window_opens_a_saved_profile(qapp, tmp_path) -> None:
+    from wosint.gui.main_window import MainWindow
+
+    window = MainWindow(Settings())
+    try:
+        assert window.load_profile(saved_profile_file(tmp_path), merge=False)
+        assert window.results_panel.tabs.currentWidget() is window.profile_panel
+        assert any(
+            e.display == "Jane Doe" for e in window.profile_panel.investigation.entities.values()
+        )
+    finally:
+        window.close()
+
+
+def test_the_window_refuses_a_file_that_is_not_a_profile(qapp, tmp_path, monkeypatch) -> None:
+    """A bad file says so; it does not half-load and leave a mangled profile."""
+    from wosint.gui import main_window as main_window_module
+
+    warnings = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append(args[2]),
+    )
+
+    window = main_window_module.MainWindow(Settings())
+    try:
+        window.profile_panel.add_scan(
+            profile_scan("janedoe", "github", [Finding("profile", "Location", "Berlin")])
+        )
+        path = tmp_path / "notes.json"
+        path.write_text("not json at all", encoding="utf-8")
+
+        assert not window.load_profile(path, merge=False)
+        assert warnings and "JSON" in warnings[0]
+        assert window.profile_panel.investigation.scanned == ["janedoe"]
+    finally:
+        window.close()
+
+
+def test_the_window_does_not_ask_when_the_profile_is_empty(qapp, tmp_path) -> None:
+    """Nothing to lose, so opening a file is not worth a dialog."""
+    from wosint.gui.main_window import MainWindow
+
+    window = MainWindow(Settings())
+    try:
+        assert window._ask_how_to_open() is False
+        assert window.load_profile(saved_profile_file(tmp_path))
+    finally:
+        window.close()
+
+
+def test_the_file_menu_offers_opening_a_saved_profile(qapp) -> None:
+    from wosint.gui.main_window import MainWindow
+
+    window = MainWindow(Settings())
+    try:
+        file_menu = next(
+            action.menu() for action in window.menuBar().actions() if action.text() == "&File"
+        )
+        labels = [a.text().replace("&", "") for a in file_menu.actions()]
+        assert any("Open saved profile" in label for label in labels)
+        assert any("Export profile as JSON" in label for label in labels)
+    finally:
+        window.close()

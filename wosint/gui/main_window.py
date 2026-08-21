@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.correlate import Investigation
+from ..core.entities import InvestigationError
 from ..core.models import ModuleResult, ModuleStatus, Scan
 from ..core.registry import modules_for
 from ..core.settings import Settings
@@ -120,7 +122,9 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         scan_menu.addAction(quit_action)
 
-        export_menu = self.menuBar().addMenu("&Export")
+        # Named for what it does now that a profile can come back in as well as
+        # go out; "Export" would be half the story.
+        export_menu = self.menuBar().addMenu("&File")
         json_action = QAction("Export scan as &JSON…", self)
         json_action.setShortcut(QKeySequence("Ctrl+S"))
         json_action.triggered.connect(self._export_json)
@@ -133,6 +137,13 @@ class MainWindow(QMainWindow):
         profile_action = QAction("Export &profile as JSON…", self)
         profile_action.triggered.connect(self._export_profile)
         export_menu.addAction(profile_action)
+
+        export_menu.addSeparator()
+        open_profile = QAction("Open sa&ved profile…", self)
+        open_profile.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        open_profile.setStatusTip("Reopen a profile exported earlier and carry on from it")
+        open_profile.triggered.connect(self._import_profile)
+        export_menu.addAction(open_profile)
 
         settings_menu = self.menuBar().addMenu("&Settings")
         advanced = QAction("&Advanced settings…", self)
@@ -382,6 +393,76 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export failed", str(exc))
             return
         self.statusBar().showMessage(f"Exported profile to {path}", STATUS_TIMEOUT_MS)
+
+    def _import_profile(self) -> None:
+        """Reopen a profile exported earlier."""
+        path, _ = QFileDialog.getOpenFileName(self, "Open profile", "", "JSON (*.json)")
+        if not path:
+            return
+        self.load_profile(Path(path))
+
+    def load_profile(self, path: Path, *, merge: bool | None = None) -> bool:
+        """Read a saved profile and show it, returning whether it was loaded.
+
+        ``merge`` decides what happens to a profile already on screen; left
+        unset the analyst is asked, because both answers are reasonable and
+        picking one silently would either lose their morning's work or graft a
+        stranger's profile onto it.
+        """
+        try:
+            investigation = Investigation.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            # A picture or a database picked by mistake is a bad file, not a
+            # traceback; UnicodeDecodeError is a ValueError and would otherwise
+            # sail past the handler below.
+            QMessageBox.warning(self, "Could not open profile", str(exc))
+            return False
+        except InvestigationError as exc:
+            QMessageBox.warning(self, "Not a Wosint profile", str(exc))
+            return False
+
+        if merge is None:
+            merge = self._ask_how_to_open()
+            if merge is None:
+                return False
+
+        self.profile_panel.load_investigation(investigation, merge=merge)
+        self.results_panel.tabs.setCurrentWidget(self.profile_panel)
+        count = len(investigation.entities)
+        verb = "Merged" if merge else "Opened"
+        self.statusBar().showMessage(
+            f"{verb} {count} entit{'ies' if count != 1 else 'y'} from {path.name}",
+            STATUS_TIMEOUT_MS,
+        )
+        return True
+
+    def _ask_how_to_open(self) -> bool | None:
+        """Whether to merge into the current profile, replace it, or neither.
+
+        Returns ``None`` if the analyst cancelled. Nothing is asked when the
+        profile is empty: there is nothing to lose, so the file simply opens.
+        """
+        if not self.profile_panel.investigation.entities:
+            return False
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Open profile")
+        box.setText("There is already a profile open.")
+        box.setInformativeText(
+            "Merge the file into it, or replace what is on screen? Merging "
+            "treats both as the same subject."
+        )
+        merge_button = box.addButton("Merge", QMessageBox.ButtonRole.AcceptRole)
+        replace_button = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is merge_button:
+            return True
+        if clicked is replace_button:
+            return False
+        return None
 
     def _show_about(self) -> None:
         from .. import __version__
