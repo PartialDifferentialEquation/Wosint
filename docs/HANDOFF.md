@@ -37,15 +37,15 @@ a web app. That was a deliberate choice by the project owner.
 | | |
 |---|---|
 | Branch | `claude/dev-continuation-47l61d`, off `claude/osint-frontend-wrapper-3lpha3` (see §12) |
-| Latest commit | `Reopen a saved investigation` |
-| Tests | **410 passing**, no network and no CLI tools required |
+| Latest commit | `cf41d24` |
+| Tests | **413 passing**, no network and no CLI tools required |
 | Lint | `ruff check` and `ruff format --check` both clean |
-| Size | ~7,800 lines of app code, ~4,100 lines of tests |
+| Size | ~8,200 lines of app code, ~4,500 lines of tests |
 | Modules | 29 |
 | Python | 3.10+ (CI runs 3.10, 3.11, 3.12) |
 | PR | None opened yet |
 
-**The nine commits, in order** — each is a coherent milestone and the messages
+**The ten commits, in order** — each is a coherent milestone and the messages
 are detailed:
 
 ```
@@ -57,7 +57,8 @@ c0e8949  Add image analysis: offline EXIF and Claude vision
 06bbe4c  Rewrite the vision module for the Gemini API
 febad6b  Add requirements.txt
 23943e7  Add explicit target types, photo intent, and an advanced settings panel
-         Reopen a saved investigation
+c3f3959  Add a handoff document
+cf41d24  Reopen a saved investigation
 ```
 
 ### What is proven, and what is not
