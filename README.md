@@ -346,6 +346,13 @@ class MyModule(ApiModule):
 Add it to the import list in `wosint/modules/__init__.py` and it appears in
 both the GUI and the CLI. Nothing else needs to change.
 
+## Picking this up
+
+If you are new to the codebase, [`docs/HANDOFF.md`](docs/HANDOFF.md) is written
+for exactly that: what the project is, how the pieces fit, the invariants that
+must not be broken, which modules have and have not been verified against live
+services, and the bugs that were found the hard way.
+
 ## Development
 
 ```bash
